@@ -1,0 +1,25 @@
+# Polling interval in seconds
+poll_interval: 300
+
+# Keywords to watch for in group messages
+keywords:
+  - 部署
+  - 故障
+  - 发版
+
+# AI model configuration
+ai:
+  provider: claude        # claude / openai / ollama
+  model: claude-sonnet-4-6
+  api_key: your-api-key-here
+  base_url: ""            # For openai-compatible or ollama endpoints
+
+# Excluded chat IDs (messages from these chats will be ignored)
+exclude_chat_ids:
+  - oc_xxxxxxxxxxxx    # LarkListener Bot
+  - oc_xxxxxxxxxxxx    # System notifications
+
+# Notification target
+notify:
+  user_id: ou_xxxxxxxxxxxx
+  bot_chat_id: oc_xxxxxxxxxxxx

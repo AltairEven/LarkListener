@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from datetime import datetime
+from enum import Enum
+from typing import Any, Optional
+
+
+class MessageCategory(Enum):
+    P2P = "p2p"
+    AT_ME = "at_me"
+    KEYWORD = "keyword"
+
+
+class Fetcher:
+    def __init__(self, keywords: Optional[list[str]] = None):
+        self.keywords = keywords or []
+
+    def fetch(
+        self,
+        start: datetime,
+        end: datetime,
+        processed_ids: set[str],
+        exclude_chat_ids: Optional[set[str]] = None,
+    ) -> dict[MessageCategory, list[dict[str, Any]]]:
+        seen_ids: set[str] = set(processed_ids)
+        _exclude = exclude_chat_ids or set()
+        result = {cat: [] for cat in MessageCategory}
+
+        # Priority order: P2P > AT_ME > KEYWORD
+        # 1. Private messages
+        p2p_msgs = self._search(start, end, chat_type="p2p")
+        for msg in p2p_msgs:
+            mid = msg["message_id"]
+            if mid not in seen_ids and msg.get("chat_id") not in _exclude:
+                result[MessageCategory.P2P].append(msg)
+                seen_ids.add(mid)
+
+        # 2. @me messages in groups
+        at_msgs = self._search(start, end, chat_type="group", is_at_me=True)
+        for msg in at_msgs:
+            mid = msg["message_id"]
+            if mid not in seen_ids and msg.get("chat_id") not in _exclude:
+                result[MessageCategory.AT_ME].append(msg)
+                seen_ids.add(mid)
+
+        # 3. Keyword matches
+        for keyword in self.keywords:
+            kw_msgs = self._search(start, end, query=keyword)
+            for msg in kw_msgs:
+                mid = msg["message_id"]
+                if mid not in seen_ids and msg.get("chat_id") not in _exclude:
+                    msg["matched_keyword"] = keyword
+                    result[MessageCategory.KEYWORD].append(msg)
+                    seen_ids.add(mid)
+
+        return result
+
+    def _search(
+        self,
+        start: datetime,
+        end: datetime,
+        chat_type: Optional[str] = None,
+        is_at_me: bool = False,
+        query: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        cmd = [
+            "lark-cli", "im", "+messages-search",
+            "--start", start.replace(microsecond=0).isoformat(),
+            "--end", end.replace(microsecond=0).isoformat(),
+            "--format", "json",
+            "--page-all",
+        ]
+        if chat_type:
+            cmd.extend(["--chat-type", chat_type])
+        if is_at_me:
+            cmd.append("--is-at-me")
+        if query:
+            cmd.extend(["--query", query])
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            return []
+
+        data = json.loads(proc.stdout)
+        if not data.get("ok"):
+            return []
+
+        # lark-cli wraps results in data.messages or data.items
+        inner = data.get("data", {})
+        return inner.get("messages", inner.get("items", []))
