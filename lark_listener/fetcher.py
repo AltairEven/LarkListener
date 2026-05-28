@@ -11,6 +11,7 @@ class MessageCategory(Enum):
     P2P = "p2p"
     AT_ME = "at_me"
     KEYWORD = "keyword"
+    AT_ALL = "at_all"
 
 
 class Fetcher:
@@ -37,12 +38,15 @@ class Fetcher:
                 result[MessageCategory.P2P].append(msg)
                 seen_ids.add(mid)
 
-        # 2. @me messages in groups
+        # 2. @me / @all messages in groups
         at_msgs = self._search(start, end, chat_type="group", is_at_me=True)
         for msg in at_msgs:
             mid = msg["message_id"]
             if mid not in seen_ids and msg.get("chat_id") not in _exclude:
-                result[MessageCategory.AT_ME].append(msg)
+                content = msg.get("content", "")
+                is_at_all = "@everyone" in content or "@所有人" in content
+                cat = MessageCategory.AT_ALL if is_at_all else MessageCategory.AT_ME
+                result[cat].append(msg)
                 seen_ids.add(mid)
 
         # 3. Keyword matches
@@ -63,7 +67,7 @@ class Fetcher:
     def _fill_chat_names(self, result: dict[MessageCategory, list[dict[str, Any]]]):
         """Look up chat names for group messages missing chat_name."""
         missing_ids: set[str] = set()
-        for cat in (MessageCategory.AT_ME, MessageCategory.KEYWORD):
+        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL, MessageCategory.KEYWORD):
             for msg in result[cat]:
                 if not msg.get("chat_name") and msg.get("chat_id"):
                     missing_ids.add(msg["chat_id"])
@@ -79,7 +83,7 @@ class Fetcher:
                 name_map[chat_id] = name
 
         # Apply names back
-        for cat in (MessageCategory.AT_ME, MessageCategory.KEYWORD):
+        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL, MessageCategory.KEYWORD):
             for msg in result[cat]:
                 if not msg.get("chat_name") and msg.get("chat_id") in name_map:
                     msg["chat_name"] = name_map[msg["chat_id"]]

@@ -70,8 +70,6 @@ def _format_conversation(
         title = partner or "私聊"
     else:
         title = group.get("chat_name") or f"群聊({chat_id[-8:]})"
-        if cat == MessageCategory.KEYWORD and group.get("matched_keyword"):
-            title += f"（命中：{group['matched_keyword']}）"
 
     urgency_icon = ""
     if analysis and analysis.urgency == "urgent":
@@ -93,8 +91,13 @@ def _format_conversation(
     if len(display_content) > 80:
         display_content = display_content[:80] + "..."
 
-    # First line: name + quoted message + link
-    header = f"**{urgency_icon}{title}**：**\u201c{display_content}\u201d** [查看原文]({link})"
+    # Title bold, content not bold, keyword hint outside bold
+    if cat == MessageCategory.KEYWORD and group.get("matched_keyword"):
+        name_part = f"{urgency_icon}**{title}**（命中：{group['matched_keyword']}）"
+    else:
+        name_part = f"{urgency_icon}**{title}**"
+
+    header = f"{name_part}：\u201c{display_content}\u201d [查看原文]({link})"
 
     # AI analysis in italic
     ai_line = ""
@@ -136,10 +139,12 @@ def build_summary_text(
 
     category_config = [
         (MessageCategory.P2P, "私聊消息"),
-        (MessageCategory.AT_ME, "@我 / @所有人"),
+        (MessageCategory.AT_ME, "@我"),
         (MessageCategory.KEYWORD, "关键词命中"),
+        (MessageCategory.AT_ALL, "@所有人"),
     ]
 
+    rendered_sections = []
     for cat, label in category_config:
         cat_groups = [g for g in groups.values() if g["category"] == cat]
         if not cat_groups:
@@ -150,13 +155,13 @@ def build_summary_text(
             key=lambda g: 0 if analysis.get(g["chat_id"]) and analysis[g["chat_id"]].urgency == "urgent" else 1,
         )
 
-        sections.append(f"━━ {label}（{len(cat_groups)} 个会话）━━")
-        for idx, group in enumerate(cat_groups):
+        lines = [f"**━━ {label}（{len(cat_groups)} 个会话）━━**"]
+        for group in cat_groups:
             ar = analysis.get(group["chat_id"])
-            sections.append(_format_conversation(group, ar, my_user_id))
-            if idx < len(cat_groups) - 1:
-                sections.append("---")
-        sections.append("")
+            lines.append(_format_conversation(group, ar, my_user_id))
+        rendered_sections.append("\n\n".join(lines))
+
+    sections.append("\n\n---\n\n".join(rendered_sections))
 
     return "\n".join(sections).strip()
 
@@ -200,6 +205,7 @@ class Notifier:
         p2p = sum(1 for g in groups.values() if g["category"] == MessageCategory.P2P)
         at_me = sum(1 for g in groups.values() if g["category"] == MessageCategory.AT_ME)
         kw = sum(1 for g in groups.values() if g["category"] == MessageCategory.KEYWORD)
+        at_all = sum(1 for g in groups.values() if g["category"] == MessageCategory.AT_ALL)
 
         counts = []
         if p2p:
@@ -208,6 +214,8 @@ class Notifier:
             counts.append(f"{at_me}个@我")
         if kw:
             counts.append(f"{kw}个关键词命中")
+        if at_all:
+            counts.append(f"{at_all}个@所有人")
         message = "、".join(counts)
 
         open_url = f"https://applink.feishu.cn/client/chat/open?openChatId={self.bot_chat_id}"

@@ -37,6 +37,7 @@ SAMPLE_MESSAGES = {
         _make_msg("msg_003", "oc_group2", "ou_wangwu", "王五", "部署流水线挂了",
                   chat_name="运维群", matched_keyword="部署"),
     ],
+    MessageCategory.AT_ALL: [],
 }
 
 SAMPLE_ANALYSIS = {
@@ -51,9 +52,9 @@ SAMPLE_ANALYSIS = {
 
 def test_build_summary_text_contains_sections():
     text = build_summary_text(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
-    assert "私聊消息" in text
-    assert "@我" in text
-    assert "关键词命中" in text
+    assert "**━━ 私聊消息" in text
+    assert "**━━ @我" in text
+    assert "**━━ 关键词命中" in text
     assert "查看原文" in text
 
 
@@ -66,7 +67,7 @@ def test_build_summary_text_contains_names():
 
 def test_build_summary_text_shows_keyword():
     text = build_summary_text(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
-    assert "部署" in text
+    assert "命中：部署" in text
 
 
 def test_build_summary_text_shows_time_range():
@@ -101,6 +102,7 @@ def test_build_summary_only_self_messages_returns_empty():
         ],
         MessageCategory.AT_ME: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     text = build_summary_text(messages, {}, "15:00", "15:30", MY_USER_ID)
     assert text == ""
@@ -124,6 +126,7 @@ def test_build_summary_truncates_long_content():
         ],
         MessageCategory.AT_ME: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     text = build_summary_text(messages, {}, "15:00", "15:30", MY_USER_ID)
     assert "..." in text
@@ -139,6 +142,7 @@ def test_build_summary_card_message_shows_title():
         ],
         MessageCategory.P2P: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     analysis = {
         "oc_card": ConversationAnalysis("oc_card", "high", "urgent", "汇率异常告警", "msg_card"),
@@ -158,6 +162,7 @@ def test_build_summary_card_without_title_shows_label():
         ],
         MessageCategory.P2P: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     analysis = {
         "oc_card": ConversationAnalysis("oc_card", "high", "normal", "通知", "msg_card"),
@@ -177,6 +182,7 @@ def test_build_summary_relevant_message_used():
         ],
         MessageCategory.P2P: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     analysis = {
         "oc_conv": ConversationAnalysis("oc_conv", "high", "normal", "重要讨论", "msg_important"),
@@ -196,6 +202,7 @@ def test_build_summary_urgent_conversations_first():
         ],
         MessageCategory.P2P: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     analysis = {
         "oc_normal": ConversationAnalysis("oc_normal", "medium", "normal", "普通", "msg_normal"),
@@ -212,6 +219,52 @@ def test_build_summary_conversation_count():
     """Section header should show conversation count."""
     text = build_summary_text(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
     assert "1 个会话" in text
+
+
+def test_build_summary_sections_separated_by_divider():
+    """Sections should be separated by --- divider."""
+    text = build_summary_text(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
+    assert "---" in text
+
+
+def test_build_summary_at_all_section():
+    """@所有人 messages should appear in their own section."""
+    messages = {
+        MessageCategory.P2P: [],
+        MessageCategory.AT_ME: [],
+        MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [
+            _make_msg("msg_all", "oc_all", "ou_bot", "机器人",
+                      "全员通知 @everyone", chat_name="全员群"),
+        ],
+    }
+    analysis = {
+        "oc_all": ConversationAnalysis("oc_all", "medium", "normal", "全员通知", "msg_all"),
+    }
+    text = build_summary_text(messages, analysis, "15:00", "15:30", MY_USER_ID)
+    assert "**━━ @所有人" in text
+    assert "全员群" in text
+
+
+def test_build_summary_section_order():
+    """Sections should appear in order: 私聊 → @我 → 关键词 → @所有人."""
+    messages = {
+        MessageCategory.P2P: [
+            _make_msg("msg_p", "oc_p", "ou_a", "A", "私聊"),
+        ],
+        MessageCategory.AT_ME: [
+            _make_msg("msg_m", "oc_m", "ou_b", "B", "@你 看看", chat_name="群1"),
+        ],
+        MessageCategory.KEYWORD: [
+            _make_msg("msg_k", "oc_k", "ou_c", "C", "部署完成",
+                      chat_name="群2", matched_keyword="部署"),
+        ],
+        MessageCategory.AT_ALL: [
+            _make_msg("msg_a", "oc_a", "ou_d", "D", "通知 @everyone", chat_name="群3"),
+        ],
+    }
+    text = build_summary_text(messages, {}, "15:00", "15:30", MY_USER_ID)
+    assert text.index("私聊消息") < text.index("@我") < text.index("关键词命中") < text.index("@所有人")
 
 
 # --- Notifier tests ---
@@ -271,6 +324,7 @@ def test_notify_skips_only_self_messages(mock_run):
         ],
         MessageCategory.AT_ME: [],
         MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
     }
     notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
     notifier.notify(messages, {}, "15:00", "15:30", my_user_id=MY_USER_ID)

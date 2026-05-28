@@ -159,6 +159,7 @@ SAMPLE_MESSAGES = {
         },
     ],
     MessageCategory.KEYWORD: [],
+    MessageCategory.AT_ALL: [],
 }
 
 SAMPLE_AI_RESPONSE = [
