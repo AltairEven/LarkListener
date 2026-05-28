@@ -28,31 +28,36 @@ logger = logging.getLogger("lark_listener")
 _running = True
 _trigger_queue: queue.Queue[Optional[str]] = queue.Queue()
 
-TRIGGER_KEYWORDS = {"汇总", "总结", "summary"}
-
-TIME_PARSE_PROMPT = """\
+TRIGGER_PROMPT = """\
 当前时间：{now}
 
-用户发送了以下消息，请从中提取"从什么时间开始汇总"的起始时间。
+你是消息助手的意图识别模块。用户给 Bot 发了一条消息，请判断用户是否想要汇总/总结消息。
+
 用户消息："{message}"
 
-请严格按以下规则输出 JSON，不要输出其他内容：
-- 如果能识别出时间，输出：{{"ok": true, "start_time": "ISO 8601 格式，带 +08:00 时区"}}
-- 如果无法识别时间（只是简单的"汇总"等），输出：{{"ok": false}}
+请严格输出 JSON，不要输出其他内容：
+- 如果用户想汇总消息且指定了时间范围，输出：{{"is_trigger": true, "start_time": "ISO 8601 格式，带 +08:00 时区"}}
+- 如果用户想汇总消息但没指定时间，输出：{{"is_trigger": true, "start_time": null}}
+- 如果用户不是想汇总消息，输出：{{"is_trigger": false, "start_time": null}}
 
 示例：
-- "汇总今天上午的消息" → {{"ok": true, "start_time": "2026-05-28T00:00:00+08:00"}}
-- "汇总最近2小时" → {{"ok": true, "start_time": "2026-05-28T07:00:00+08:00"}}
-- "总结昨天下午3点以后的" → {{"ok": true, "start_time": "2026-05-27T15:00:00+08:00"}}
-- "汇总" → {{"ok": false}}"""
+- "汇总今天上午的消息" → {{"is_trigger": true, "start_time": "{today}T00:00:00+08:00"}}
+- "帮我看看最近2小时有什么消息" → {{"is_trigger": true, "start_time": "{two_hours_ago}"}}
+- "总结一下" → {{"is_trigger": true, "start_time": null}}
+- "你好" → {{"is_trigger": false, "start_time": null}}"""
 
 
-def _parse_time_with_ai(message: str, config: dict) -> Optional[datetime]:
-    """Use AI to parse natural language time from user message."""
+def _parse_trigger_with_ai(message: str, config: dict) -> tuple[bool, Optional[datetime]]:
+    """Use AI to determine if message is a summary trigger and extract time."""
     ai_cfg = config["ai"]
     api_key = ai_cfg.get("api_key", "")
     now = datetime.now(TZ)
-    prompt = TIME_PARSE_PROMPT.format(now=now.isoformat(), message=message)
+    prompt = TRIGGER_PROMPT.format(
+        now=now.isoformat(),
+        message=message,
+        today=now.strftime("%Y-%m-%d"),
+        two_hours_ago=(now - timedelta(hours=2)).isoformat(),
+    )
 
     try:
         if ai_cfg["provider"] == "openai":
@@ -84,14 +89,17 @@ def _parse_time_with_ai(message: str, config: dict) -> Optional[datetime]:
                 data = json.loads(resp.read())
             result = json.loads(data["message"]["content"])
         else:
-            return None
+            return False, None
 
-        if result.get("ok") and result.get("start_time"):
-            return datetime.fromisoformat(result["start_time"])
+        is_trigger = result.get("is_trigger", False)
+        start_time = None
+        if is_trigger and result.get("start_time"):
+            start_time = datetime.fromisoformat(result["start_time"])
+        return is_trigger, start_time
     except Exception:
-        logger.exception("Failed to parse time from message: %s", message)
+        logger.exception("Failed to parse trigger from message: %s", message)
 
-    return None
+    return False, None
 
 
 def _reply_bot(user_id: str, text: str):
@@ -110,17 +118,27 @@ def _handle_signal(signum, frame):
     _trigger_queue.put(None)
 
 
+def _kill_stale_event_subscribers():
+    """Kill any leftover lark-cli event subscribe processes."""
+    try:
+        subprocess.run(
+            ["pkill", "-f", "lark-cli event.*subscribe.*--as bot"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def _bot_listener():
     """Background thread: listen for bot messages via WebSocket, trigger poll on command."""
+    _kill_stale_event_subscribers()
     while _running:
         try:
             proc = subprocess.Popen(
                 [
                     "lark-cli", "event", "+subscribe",
                     "--event-types", "im.message.receive_v1",
-                    "--compact",
                     "--as", "bot",
-                    "--quiet",
                     "--force",
                 ],
                 stdout=subprocess.PIPE,
@@ -135,17 +153,23 @@ def _bot_listener():
                 line = line.strip()
                 if not line:
                     continue
+                logger.debug("Bot listener raw line: %s", line[:500])
                 try:
                     event = json.loads(line)
-                    content = event.get("content", "").strip()
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    # Raw event format: event.message.content = '{"text":"..."}'
+                    msg_content = event.get("event", {}).get("message", {}).get("content", "")
+                    try:
+                        content = json.loads(msg_content).get("text", "")
+                    except (json.JSONDecodeError, AttributeError):
+                        content = msg_content
+                    content = content.strip()
                     if not content:
                         continue
-                    # Check if message starts with a trigger keyword
-                    content_lower = content.lower()
-                    is_trigger = any(content_lower.startswith(kw) for kw in TRIGGER_KEYWORDS)
-                    if is_trigger:
-                        logger.info("Received trigger command: %s", content)
-                        _trigger_queue.put(content)
+                    logger.info("Bot received message: %s", content[:100])
+                    _trigger_queue.put(content)
                 except json.JSONDecodeError:
                     continue
 
@@ -271,10 +295,13 @@ def main():
             trigger_msg = _trigger_queue.get(timeout=interval)
             if trigger_msg is None:
                 break
-            # Parse time from trigger message
+            # Use AI to determine intent and extract time
             config = load_config(config_path)
             my_user_id = config["notify"]["user_id"]
-            custom_start = _parse_time_with_ai(trigger_msg, config)
+            is_trigger, custom_start = _parse_trigger_with_ai(trigger_msg, config)
+            if not is_trigger:
+                logger.info("Message not a trigger: %s", trigger_msg[:50])
+                continue
             now = datetime.now(TZ)
             if custom_start:
                 logger.info("Trigger with custom start: %s", custom_start.isoformat())
