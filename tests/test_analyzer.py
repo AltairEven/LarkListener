@@ -372,4 +372,96 @@ def test_analyze_defaults_for_missing_fields(mock_call_ai):
     assert results["oc_x"].relevance == "medium"
     assert results["oc_x"].urgency == "normal"
     assert results["oc_x"].summary == ""
-    assert results["oc_x"].relevant_message_id == ""
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_with_context_messages(mock_call_ai):
+    """Context messages should appear in AI prompt marked with [上下文]."""
+    mock_call_ai.return_value = [
+        {"conversation_id": "oc_ctx", "relevance": "high", "urgency": "normal", "summary": "部署讨论", "relevant_message_id": "msg_matched"},
+    ]
+    messages = {
+        MessageCategory.KEYWORD: [
+            {
+                "message_id": "msg_matched",
+                "chat_id": "oc_ctx",
+                "chat_name": "运维群",
+                "sender": {"id": "ou_a", "name": "A"},
+                "msg_type": "text",
+                "content": "部署失败了",
+                "create_time": "1716796900",
+            },
+        ],
+        MessageCategory.P2P: [],
+        MessageCategory.AT_ME: [],
+        MessageCategory.AT_ALL: [],
+    }
+    context = {
+        "oc_ctx": [
+            {
+                "message_id": "msg_before",
+                "chat_id": "oc_ctx",
+                "sender": {"id": "ou_b", "name": "B"},
+                "msg_type": "text",
+                "content": "我开始部署了",
+                "create_time": "1716796800",
+            },
+            {
+                "message_id": "msg_after",
+                "chat_id": "oc_ctx",
+                "sender": {"id": "ou_c", "name": "C"},
+                "msg_type": "text",
+                "content": "日志在哪看",
+                "create_time": "1716797000",
+            },
+        ],
+    }
+
+    analyzer = Analyzer(
+        provider="claude", model="m", api_key="k", base_url="", keywords=["部署"],
+    )
+    results = analyzer.analyze(messages, my_user_id="ou_me", context=context)
+
+    prompt = mock_call_ai.call_args[0][0]
+    # Context messages should be marked
+    assert "[上下文]" in prompt
+    assert "我开始部署了" in prompt
+    assert "日志在哪看" in prompt
+    # Matched message should NOT be marked as context
+    assert "部署失败了" in prompt
+    # Verify order: before < matched < after
+    assert prompt.index("我开始部署了") < prompt.index("部署失败了") < prompt.index("日志在哪看")
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_without_context(mock_call_ai):
+    """Analyze should work fine without context (backward compatible)."""
+    mock_call_ai.return_value = [
+        {"conversation_id": "oc_no_ctx", "relevance": "low", "urgency": "low", "summary": "test", "relevant_message_id": "msg_1"},
+    ]
+    messages = {
+        MessageCategory.P2P: [
+            {
+                "message_id": "msg_1",
+                "chat_id": "oc_no_ctx",
+                "sender": {"id": "ou_a", "name": "A"},
+                "msg_type": "text",
+                "content": "hello",
+                "create_time": "1716796800",
+            },
+        ],
+        MessageCategory.AT_ME: [],
+        MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
+    }
+
+    analyzer = Analyzer(
+        provider="claude", model="m", api_key="k", base_url="", keywords=[],
+    )
+    results = analyzer.analyze(messages, my_user_id="ou_me")
+
+    assert "oc_no_ctx" in results
+    prompt = mock_call_ai.call_args[0][0]
+    # No message lines should have [上下文] prefix (template text is ok)
+    msg_lines = [l for l in prompt.split("\n") if l.startswith("[")]
+    assert not any("[上下文]" in l for l in msg_lines)

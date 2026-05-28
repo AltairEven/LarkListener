@@ -8,6 +8,7 @@ from typing import Any, Optional
 DEFAULTS = {
     "poll_interval": 300,
     "include_at_all": True,
+    "context_messages": 20,
     "ai": {
         "base_url": "",
     },

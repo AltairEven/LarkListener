@@ -143,6 +143,9 @@ poll_interval: $POLL_INTERVAL
 # 是否汇总 @所有人 的消息（关键词命中的仍会汇总）
 include_at_all: true
 
+# AI 分析时拉取的上下文消息数（0 则不拉取）
+context_messages: 20
+
 # 关注的关键词
 keywords:$(echo -e "$KEYWORDS_YAML")
 

@@ -13,7 +13,7 @@ SYSTEM_PROMPT = "你是消息分析助手。请严格输出 JSON 数组，不要
 USER_PROMPT_TEMPLATE = """\
 用户关注的关键词：{keywords}
 
-以下是按会话分组的消息。标记为 [我] 的是用户自己发的消息，仅作为理解上下文使用。
+以下是按会话分组的消息。标记为 [我] 的是用户自己发的消息，标记为 [上下文] 的是前后相关消息，两者仅作为理解上下文使用。
 请对每个会话（conversation_id）进行整体分析，输出：
 1. conversation_id: 会话 ID
 2. relevance: 该会话与关键词的语义相关度（high/medium/low）
@@ -103,14 +103,17 @@ class Analyzer:
         self,
         categorized: dict[MessageCategory, list[dict[str, Any]]],
         my_user_id: str = "",
+        context: Optional[dict[str, list[dict[str, Any]]]] = None,
     ) -> dict[str, ConversationAnalysis]:
         """Analyze messages grouped by conversation (chat_id)."""
         # Group all messages by chat_id
+        matched_ids: set[str] = set()
         conversations: dict[str, list[dict[str, Any]]] = {}
         for msgs in categorized.values():
             for msg in msgs:
                 chat_id = msg.get("chat_id", "unknown")
                 conversations.setdefault(chat_id, []).append(msg)
+                matched_ids.add(msg["message_id"])
 
         if not conversations:
             return {}
@@ -118,14 +121,26 @@ class Analyzer:
         # Build prompt with conversations
         conv_texts = []
         for chat_id, msgs in conversations.items():
+            # Merge matched messages with context messages
+            all_msgs = list(msgs)
+            if context and chat_id in context:
+                for ctx_msg in context[chat_id]:
+                    if ctx_msg["message_id"] not in matched_ids:
+                        all_msgs.append(ctx_msg)
             # Sort by create_time
-            msgs_sorted = sorted(msgs, key=lambda m: m.get("create_time", ""))
+            msgs_sorted = sorted(all_msgs, key=lambda m: m.get("create_time", ""))
             lines = [f"--- conversation_id: {chat_id} ---"]
             for msg in msgs_sorted:
                 sender = msg.get("sender", {}).get("name", "未知")
                 sender_id = msg.get("sender", {}).get("id", "")
                 is_me = sender_id == my_user_id
-                prefix = "[我] " if is_me else ""
+                is_ctx = msg["message_id"] not in matched_ids
+                if is_me:
+                    prefix = "[我] "
+                elif is_ctx:
+                    prefix = "[上下文] "
+                else:
+                    prefix = ""
                 content = format_msg_content(msg)
                 lines.append(f"[{msg['message_id']}] {prefix}{sender}: {content}")
             conv_texts.append("\n".join(lines))

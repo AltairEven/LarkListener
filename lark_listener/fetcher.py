@@ -45,7 +45,7 @@ class Fetcher:
             mid = msg["message_id"]
             if mid not in seen_ids and msg.get("chat_id") not in _exclude:
                 content = msg.get("content", "")
-                is_at_all = "@everyone" in content or "@所有人" in content
+                is_at_all = "@everyone" in content or "@所有人" in content or "@all" in content
                 if is_at_all and not self.include_at_all:
                     # Skip AT_ALL but don't mark as seen,
                     # so keyword search can still pick it up
@@ -68,6 +68,33 @@ class Fetcher:
         self._fill_chat_names(result)
 
         return result
+
+    def fetch_context(
+        self,
+        categorized: dict[MessageCategory, list[dict[str, Any]]],
+        start: datetime,
+        end: datetime,
+        limit: int = 20,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Fetch surrounding messages for each chat to provide AI context."""
+        # Collect chat_ids and their matched message_ids
+        chat_matched_ids: dict[str, set[str]] = {}
+        for msgs in categorized.values():
+            for msg in msgs:
+                chat_id = msg.get("chat_id", "")
+                if chat_id:
+                    chat_matched_ids.setdefault(chat_id, set()).add(msg["message_id"])
+
+        context: dict[str, list[dict[str, Any]]] = {}
+        for chat_id, matched_ids in chat_matched_ids.items():
+            all_msgs = self._search(start, end, chat_id=chat_id)
+            # Keep up to `limit` messages, excluding already matched ones
+            ctx_msgs = [m for m in all_msgs if m["message_id"] not in matched_ids]
+            ctx_msgs = ctx_msgs[-limit:]
+            if ctx_msgs:
+                context[chat_id] = ctx_msgs
+
+        return context
 
     def _fill_chat_names(self, result: dict[MessageCategory, list[dict[str, Any]]]):
         """Look up chat names for group messages missing chat_name."""
@@ -119,6 +146,7 @@ class Fetcher:
         chat_type: Optional[str] = None,
         is_at_me: bool = False,
         query: Optional[str] = None,
+        chat_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         cmd = [
             "lark-cli", "im", "+messages-search",
@@ -133,6 +161,8 @@ class Fetcher:
             cmd.append("--is-at-me")
         if query:
             cmd.extend(["--query", query])
+        if chat_id:
+            cmd.extend(["--chat-id", chat_id])
 
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:

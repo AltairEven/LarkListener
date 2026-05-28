@@ -221,6 +221,15 @@ def poll_once(
             state.save()
         return
 
+    # Fetch context messages for richer AI analysis
+    context_limit = config.get("context_messages", 20)
+    context = {}
+    if context_limit > 0:
+        context = fetcher.fetch_context(categorized, start, end, limit=context_limit)
+        ctx_total = sum(len(msgs) for msgs in context.values())
+        if ctx_total:
+            logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
+
     ai_cfg = config["ai"]
     analyzer = Analyzer(
         provider=ai_cfg["provider"],
@@ -229,7 +238,7 @@ def poll_once(
         base_url=ai_cfg.get("base_url", ""),
         keywords=config.get("keywords", []),
     )
-    analysis = analyzer.analyze(categorized, my_user_id=my_user_id)
+    analysis = analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
 
     notifier = Notifier(
         user_id=my_user_id,
