@@ -15,8 +15,9 @@ class MessageCategory(Enum):
 
 
 class Fetcher:
-    def __init__(self, keywords: Optional[list[str]] = None):
+    def __init__(self, keywords: Optional[list[str]] = None, include_at_all: bool = True):
         self.keywords = keywords or []
+        self.include_at_all = include_at_all
 
     def fetch(
         self,
@@ -45,6 +46,10 @@ class Fetcher:
             if mid not in seen_ids and msg.get("chat_id") not in _exclude:
                 content = msg.get("content", "")
                 is_at_all = "@everyone" in content or "@所有人" in content
+                if is_at_all and not self.include_at_all:
+                    # Skip AT_ALL but don't mark as seen,
+                    # so keyword search can still pick it up
+                    continue
                 cat = MessageCategory.AT_ALL if is_at_all else MessageCategory.AT_ME
                 result[cat].append(msg)
                 seen_ids.add(mid)

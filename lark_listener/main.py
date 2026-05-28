@@ -200,7 +200,10 @@ def poll_once(
     my_user_id = notify_cfg["user_id"]
 
     exclude_ids = set(config.get("exclude_chat_ids", []))
-    fetcher = Fetcher(keywords=config.get("keywords", []))
+    fetcher = Fetcher(
+        keywords=config.get("keywords", []),
+        include_at_all=config.get("include_at_all", True),
+    )
     categorized = fetcher.fetch(
         start, end,
         processed_ids=set() if custom_start else state.processed_message_ids,

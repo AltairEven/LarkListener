@@ -132,6 +132,65 @@ def test_fetch_at_all_messages(mock_run):
 
 
 @patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_at_all_disabled_skips_at_all(mock_run):
+    """When include_at_all=False, @everyone messages should be skipped."""
+    at_all_msgs = [
+        {
+            "message_id": "msg_all",
+            "chat_id": "oc_group",
+            "chat_name": "全员群",
+            "sender": {"id": "ou_bot", "name": "Bot"},
+            "msg_type": "text",
+            "content": "全员通知 @everyone 请查看",
+            "create_time": "1716796800",
+        },
+    ]
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                        # p2p
+        _make_search_result(at_all_msgs),       # at_me (includes @all)
+        _empty_result(),                        # keyword
+    ])
+    fetcher = Fetcher(keywords=["测试"], include_at_all=False)
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+
+    assert len(result[MessageCategory.AT_ALL]) == 0
+    assert len(result[MessageCategory.AT_ME]) == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_at_all_disabled_but_keyword_matches(mock_run):
+    """When include_at_all=False, @everyone messages can still be found by keyword search."""
+    at_all_msg = {
+        "message_id": "msg_all",
+        "chat_id": "oc_group",
+        "chat_name": "全员群",
+        "sender": {"id": "ou_bot", "name": "Bot"},
+        "msg_type": "text",
+        "content": "部署完成 @everyone 请验证",
+        "create_time": "1716796800",
+    }
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                         # p2p
+        _make_search_result([at_all_msg]),        # at_me (includes @all)
+        _make_search_result([at_all_msg]),        # keyword "部署" finds same msg
+    ])
+    fetcher = Fetcher(keywords=["部署"], include_at_all=False)
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+
+    assert len(result[MessageCategory.AT_ALL]) == 0
+    assert len(result[MessageCategory.KEYWORD]) == 1
+    assert result[MessageCategory.KEYWORD][0]["matched_keyword"] == "部署"
+
+
+@patch("lark_listener.fetcher.subprocess.run")
 def test_fetch_keyword_messages(mock_run):
     kw_msgs = [
         {

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 DEFAULTS = {
     "poll_interval": 300,
+    "include_at_all": True,
     "ai": {
         "base_url": "",
     },
