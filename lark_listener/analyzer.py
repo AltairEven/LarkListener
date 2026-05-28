@@ -37,14 +37,20 @@ MSG_TYPE_LABELS = {
     "share_user": "[个人名片]",
     "location": "[位置]",
     "merge_forward": "[合并转发]",
+    "interactive": "[卡片消息]",
 }
 
 
-def format_msg_content(msg: dict[str, Any]) -> str:
-    """Format message content, replacing media with type labels."""
+def format_msg_content(msg: dict[str, Any], for_display: bool = False) -> str:
+    """Format message content. When for_display=True, hide card/rich content."""
     msg_type = msg.get("msg_type", "text")
     if msg_type in MSG_TYPE_LABELS:
         return MSG_TYPE_LABELS[msg_type]
+    content = msg.get("content", "")
+    # Card messages: show label for display, keep content for AI analysis
+    is_card = msg_type == "interactive" or (content and content.lstrip().startswith("<card"))
+    if is_card and for_display:
+        return "[卡片消息]"
     content = msg.get("content", "")
     # Detect inline links/urls in text
     if msg_type == "text" and content:

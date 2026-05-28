@@ -238,17 +238,33 @@ def main():
 
     logger.info("LarkListener starting...")
 
+    # Load config for user_id
+    config = load_config(config_path)
+    my_user_id = config["notify"]["user_id"]
+    interval = config.get("poll_interval", 300)
+
+    # Notify startup
+    _reply_bot(my_user_id, f"✅ LarkListener 已启动（轮询间隔 {interval} 秒）")
+
     # Start bot listener in background thread
     listener_thread = threading.Thread(target=_bot_listener, daemon=True)
     listener_thread.start()
+
+    error_count = 0
+    MAX_ERRORS = 3
 
     while _running:
         try:
             config = load_config(config_path)
             interval = config.get("poll_interval", 300)
+            my_user_id = config["notify"]["user_id"]
             poll_once(config_path, state_path)
+            error_count = 0  # Reset on success
         except Exception:
             logger.exception("Error during poll cycle")
+            error_count += 1
+            if error_count == MAX_ERRORS:
+                _reply_bot(my_user_id, f"⚠️ LarkListener 已连续出错 {MAX_ERRORS} 次，请检查日志：\ntail -f ~/.lark_listener/logs/stderr.log")
 
         # Wait for interval or trigger
         try:
@@ -271,6 +287,8 @@ def main():
         except queue.Empty:
             pass
 
+    # Notify shutdown
+    _reply_bot(my_user_id, "🔴 LarkListener 已停止")
     logger.info("LarkListener stopped.")
 
 

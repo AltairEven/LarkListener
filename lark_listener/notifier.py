@@ -82,13 +82,13 @@ def _format_conversation(
     if analysis and analysis.relevant_message_id:
         for m in msgs:
             if m.get("message_id") == analysis.relevant_message_id:
-                display_content = format_msg_content(m)
+                display_content = format_msg_content(m, for_display=True)
                 break
     if not display_content:
         for m in reversed(msgs):
             sender_id = m.get("sender", {}).get("id", "")
             if sender_id != my_user_id:
-                display_content = format_msg_content(m)
+                display_content = format_msg_content(m, for_display=True)
                 break
     if len(display_content) > 80:
         display_content = display_content[:80] + "..."
