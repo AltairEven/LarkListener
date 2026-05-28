@@ -228,12 +228,16 @@ PLIST
 _stop() {
     if _is_running; then
         launchctl unload "$PLIST_PATH" 2>/dev/null || true
-        pkill -f "lark-cli event" 2>/dev/null || true
-        sleep 2
-        echo "✓ 服务已停止"
-    else
-        echo "服务未在运行"
+        sleep 1
     fi
+    # Kill all related processes: main process + lark-cli event subprocess
+    pkill -f "$LISTENER_HOME/lark-listener" 2>/dev/null || true
+    pkill -f "lark-cli event.*--as bot" 2>/dev/null || true
+    sleep 1
+    # Force kill if still alive
+    pkill -9 -f "$LISTENER_HOME/lark-listener" 2>/dev/null || true
+    pkill -9 -f "lark-cli event.*--as bot" 2>/dev/null || true
+    echo "✓ 服务已停止"
 }
 
 _start() {

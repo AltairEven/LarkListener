@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -37,8 +38,21 @@ MSG_TYPE_LABELS = {
     "share_user": "[个人名片]",
     "location": "[位置]",
     "merge_forward": "[合并转发]",
-    "interactive": "[卡片消息]",
 }
+
+
+def _parse_card(content: str) -> tuple[str, str]:
+    """Extract title and body text from <card title="...">body</card> format.
+
+    Returns (title, body). Either may be empty.
+    """
+    title = ""
+    body = content
+    m = re.match(r'<card\s+title="([^"]*)"[^>]*>(.*)</card>', content, re.DOTALL)
+    if m:
+        title = m.group(1).strip()
+        body = m.group(2).strip()
+    return title, body
 
 
 def format_msg_content(msg: dict[str, Any], for_display: bool = False) -> str:
@@ -47,11 +61,14 @@ def format_msg_content(msg: dict[str, Any], for_display: bool = False) -> str:
     if msg_type in MSG_TYPE_LABELS:
         return MSG_TYPE_LABELS[msg_type]
     content = msg.get("content", "")
-    # Card messages: show label for display, keep content for AI analysis
+    # Card messages
     is_card = msg_type == "interactive" or (content and content.lstrip().startswith("<card"))
-    if is_card and for_display:
-        return "[卡片消息]"
-    content = msg.get("content", "")
+    if is_card:
+        title, body = _parse_card(content)
+        if for_display:
+            return f"[卡片] {title}" if title else "[卡片消息]"
+        # For AI analysis: return clean text
+        return f"[卡片: {title}]\n{body}" if title else body or content
     # Detect inline links/urls in text
     if msg_type == "text" and content:
         return content
