@@ -55,7 +55,53 @@ class Fetcher:
                     result[MessageCategory.KEYWORD].append(msg)
                     seen_ids.add(mid)
 
+        # Fill in missing chat names for group messages
+        self._fill_chat_names(result)
+
         return result
+
+    def _fill_chat_names(self, result: dict[MessageCategory, list[dict[str, Any]]]):
+        """Look up chat names for group messages missing chat_name."""
+        missing_ids: set[str] = set()
+        for cat in (MessageCategory.AT_ME, MessageCategory.KEYWORD):
+            for msg in result[cat]:
+                if not msg.get("chat_name") and msg.get("chat_id"):
+                    missing_ids.add(msg["chat_id"])
+
+        if not missing_ids:
+            return
+
+        # Batch lookup chat names
+        name_map: dict[str, str] = {}
+        for chat_id in missing_ids:
+            name = self._get_chat_name(chat_id)
+            if name:
+                name_map[chat_id] = name
+
+        # Apply names back
+        for cat in (MessageCategory.AT_ME, MessageCategory.KEYWORD):
+            for msg in result[cat]:
+                if not msg.get("chat_name") and msg.get("chat_id") in name_map:
+                    msg["chat_name"] = name_map[msg["chat_id"]]
+
+    def _get_chat_name(self, chat_id: str) -> Optional[str]:
+        """Get chat name via lark-cli, trying user then bot identity."""
+        for identity in ("user", "bot"):
+            try:
+                proc = subprocess.run(
+                    ["lark-cli", "im", "chats", "get",
+                     "--params", json.dumps({"chat_id": chat_id}),
+                     "--as", identity,
+                     "--jq", ".data.name"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if proc.returncode == 0:
+                    name = proc.stdout.strip().strip('"')
+                    if name and name != "null":
+                        return name
+            except Exception:
+                continue
+        return None
 
     def _search(
         self,

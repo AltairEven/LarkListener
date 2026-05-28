@@ -69,7 +69,7 @@ def _format_conversation(
                 break
         title = partner or "私聊"
     else:
-        title = group.get("chat_name") or "群聊"
+        title = group.get("chat_name") or f"群聊({chat_id[-8:]})"
         if cat == MessageCategory.KEYWORD and group.get("matched_keyword"):
             title += f"（命中：{group['matched_keyword']}）"
 
@@ -77,18 +77,24 @@ def _format_conversation(
     if analysis and analysis.urgency == "urgent":
         urgency_icon = "🔴 "
 
-    # Get last message from non-self sender
-    last_content = ""
-    for m in reversed(msgs):
-        sender_id = m.get("sender", {}).get("id", "")
-        if sender_id != my_user_id:
-            last_content = format_msg_content(m)
-            if len(last_content) > 80:
-                last_content = last_content[:80] + "..."
-            break
+    # Find the most relevant message (from AI), fallback to last non-self message
+    display_content = ""
+    if analysis and analysis.relevant_message_id:
+        for m in msgs:
+            if m.get("message_id") == analysis.relevant_message_id:
+                display_content = format_msg_content(m)
+                break
+    if not display_content:
+        for m in reversed(msgs):
+            sender_id = m.get("sender", {}).get("id", "")
+            if sender_id != my_user_id:
+                display_content = format_msg_content(m)
+                break
+    if len(display_content) > 80:
+        display_content = display_content[:80] + "..."
 
     # First line: name + quoted message + link
-    header = f"**{urgency_icon}{title}**：**\u201c{last_content}\u201d** [查看原文]({link})"
+    header = f"**{urgency_icon}{title}**：**\u201c{display_content}\u201d** [查看原文]({link})"
 
     # AI analysis in italic
     ai_line = ""

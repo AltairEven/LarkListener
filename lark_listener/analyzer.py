@@ -18,9 +18,10 @@ USER_PROMPT_TEMPLATE = """\
 2. relevance: 该会话与关键词的语义相关度（high/medium/low）
 3. urgency: 紧急度（urgent/normal/low）
 4. summary: 用一两句话概括该会话的核心内容和要点
+5. relevant_message_id: 该会话中与关键词最相关的那条消息的 ID（不要选 [我] 的消息），如果都不相关则选最后一条非 [我] 的消息
 
 输出格式为 JSON 数组：
-[{{"conversation_id": "...", "relevance": "...", "urgency": "...", "summary": "..."}}]
+[{{"conversation_id": "...", "relevance": "...", "urgency": "...", "summary": "...", "relevant_message_id": "..."}}]
 
 会话列表：
 {conversations}"""
@@ -57,6 +58,7 @@ class ConversationAnalysis:
     relevance: str
     urgency: str
     summary: str
+    relevant_message_id: str = ""
 
 
 class Analyzer:
@@ -102,7 +104,7 @@ class Analyzer:
                 is_me = sender_id == my_user_id
                 prefix = "[我] " if is_me else ""
                 content = format_msg_content(msg)
-                lines.append(f"{prefix}{sender}: {content}")
+                lines.append(f"[{msg['message_id']}] {prefix}{sender}: {content}")
             conv_texts.append("\n".join(lines))
 
         user_prompt = USER_PROMPT_TEMPLATE.format(
@@ -120,6 +122,7 @@ class Analyzer:
                 relevance=item.get("relevance", "medium"),
                 urgency=item.get("urgency", "normal"),
                 summary=item.get("summary", ""),
+                relevant_message_id=item.get("relevant_message_id", ""),
             )
         return results
 
