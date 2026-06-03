@@ -1,12 +1,40 @@
 import json
 from unittest.mock import patch
+import pytest
 from lark_listener.analyzer import (
     Analyzer,
     ConversationAnalysis,
     format_msg_content,
     _parse_card,
+    _extract_json,
 )
 from lark_listener.fetcher import MessageCategory
+
+
+# --- _extract_json tests ---
+
+
+def test_extract_json_plain_array():
+    assert _extract_json('[{"a": 1}]') == [{"a": 1}]
+
+
+def test_extract_json_markdown_fence():
+    text = '```json\n[{"conversation_id": "c1"}]\n```'
+    assert _extract_json(text) == [{"conversation_id": "c1"}]
+
+
+def test_extract_json_bare_fence():
+    assert _extract_json('```\n{"x": 1}\n```') == {"x": 1}
+
+
+def test_extract_json_with_surrounding_prose():
+    text = '好的，这是结果：\n[{"a": 1}, {"b": 2}]\n希望有帮助'
+    assert _extract_json(text) == [{"a": 1}, {"b": 2}]
+
+
+def test_extract_json_unrecoverable_raises():
+    with pytest.raises(json.JSONDecodeError):
+        _extract_json("completely not json at all")
 
 
 # --- format_msg_content tests ---

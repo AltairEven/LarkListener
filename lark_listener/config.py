@@ -26,6 +26,20 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _validate(config: dict) -> None:
+    """Raise a clear error for missing required fields instead of a later KeyError."""
+    notify = config.get("notify")
+    if not isinstance(notify, dict) or not notify.get("user_id"):
+        raise ValueError(
+            "配置缺少必需字段 notify.user_id，请检查 ~/.lark_listener/config.yaml"
+        )
+    ai = config.get("ai")
+    if not isinstance(ai, dict) or not ai.get("provider") or not ai.get("model"):
+        raise ValueError(
+            "配置缺少必需字段 ai.provider / ai.model，请检查 ~/.lark_listener/config.yaml"
+        )
+
+
 def load_config(path: Optional[str] = None) -> dict[str, Any]:
     """Load config from YAML file, applying defaults for missing fields."""
     if path is None:
@@ -38,4 +52,6 @@ def load_config(path: Optional[str] = None) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         user_config = yaml.safe_load(f) or {}
 
-    return _deep_merge(DEFAULTS, user_config)
+    config = _deep_merge(DEFAULTS, user_config)
+    _validate(config)
+    return config

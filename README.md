@@ -6,7 +6,7 @@
 
 ```bash
 # 前置依赖
-npm install -g @nicholaschen/lark-cli
+npm install -g @larksuite/cli
 brew install terminal-notifier
 
 # 安装服务

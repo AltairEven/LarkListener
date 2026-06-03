@@ -41,7 +41,7 @@ _install() {
 
     if ! command -v lark-cli &>/dev/null; then
         echo "❌ lark-cli 未安装"
-        echo "   请运行: npm install -g @nicholaschen/lark-cli"
+        echo "   请运行: npm install -g @larksuite/cli"
         HAS_ERROR=true
     else
         echo "✓ lark-cli"

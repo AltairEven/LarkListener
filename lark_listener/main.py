@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from lark_listener.analyzer import Analyzer
+from lark_listener.binaries import ensure_path, resolve_executable
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
 from lark_listener.notifier import Notifier
@@ -26,6 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("lark_listener")
 
 _running = True
+_listener_proc: Optional[subprocess.Popen] = None
 _trigger_queue: queue.Queue[Optional[str]] = queue.Queue()
 
 TRIGGER_PROMPT = """\
@@ -94,7 +96,12 @@ def _parse_trigger_with_ai(message: str, config: dict) -> tuple[bool, Optional[d
         is_trigger = result.get("is_trigger", False)
         start_time = None
         if is_trigger and result.get("start_time"):
-            start_time = datetime.fromisoformat(result["start_time"])
+            try:
+                start_time = datetime.fromisoformat(result["start_time"])
+            except (ValueError, TypeError):
+                # Keep the trigger; just fall back to the default time range
+                # instead of silently dropping the user's request.
+                logger.warning("Invalid start_time from AI: %r", result.get("start_time"))
         return is_trigger, start_time
     except Exception:
         logger.exception("Failed to parse trigger from message: %s", message)
@@ -103,12 +110,19 @@ def _parse_trigger_with_ai(message: str, config: dict) -> tuple[bool, Optional[d
 
 
 def _reply_bot(user_id: str, text: str):
-    """Send a text reply to the user via bot."""
-    subprocess.run(
-        ["lark-cli", "im", "+messages-send",
-         "--user-id", user_id, "--text", text, "--as", "bot"],
-        capture_output=True, text=True, timeout=10,
-    )
+    """Send a text reply to the user via bot.
+
+    Best-effort: a failed notification (lark-cli missing, timeout, network) must
+    never crash the service or, under launchd KeepAlive, trigger a restart loop.
+    """
+    try:
+        subprocess.run(
+            [resolve_executable("lark-cli"), "im", "+messages-send",
+             "--user-id", user_id, "--text", text, "--as", "bot"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        logger.exception("Failed to send bot reply")
 
 
 def _handle_signal(signum, frame):
@@ -116,6 +130,13 @@ def _handle_signal(signum, frame):
     logger.info("Received signal %s, shutting down...", signum)
     _running = False
     _trigger_queue.put(None)
+    # Terminate the blocking `lark-cli event` subprocess so the listener thread
+    # unblocks from `for line in proc.stdout` and exits cleanly (no orphan).
+    if _listener_proc and _listener_proc.poll() is None:
+        try:
+            _listener_proc.terminate()
+        except Exception:
+            pass
 
 
 def _kill_stale_event_subscribers():
@@ -131,12 +152,13 @@ def _kill_stale_event_subscribers():
 
 def _bot_listener():
     """Background thread: listen for bot messages via WebSocket, trigger poll on command."""
+    global _listener_proc
     _kill_stale_event_subscribers()
     while _running:
         try:
             proc = subprocess.Popen(
                 [
-                    "lark-cli", "event", "+subscribe",
+                    resolve_executable("lark-cli"), "event", "+subscribe",
                     "--event-types", "im.message.receive_v1",
                     "--as", "bot",
                     "--force",
@@ -145,6 +167,7 @@ def _bot_listener():
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            _listener_proc = proc
             logger.info("Bot listener started")
 
             for line in proc.stdout:
@@ -265,6 +288,7 @@ def poll_once(
 
 
 def main():
+    ensure_path()
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
@@ -305,8 +329,15 @@ def main():
         # Wait for interval or trigger
         try:
             trigger_msg = _trigger_queue.get(timeout=interval)
-            if trigger_msg is None:
-                break
+        except queue.Empty:
+            continue
+        if trigger_msg is None:
+            break
+
+        # Handle the trigger. A failure here (AI, network, lark-cli, bad config)
+        # must NOT crash the service — otherwise launchd KeepAlive restarts it
+        # into a "trigger → crash → restart" loop. Mirror the poll-cycle handling.
+        try:
             # Use AI to determine intent and extract time
             config = load_config(config_path)
             my_user_id = config["notify"]["user_id"]
@@ -323,8 +354,9 @@ def main():
                 logger.info("Trigger with default time range")
                 _reply_bot(my_user_id, f"⏳ 正在汇总 {start.strftime('%m-%d %H:%M')} ~ {now.strftime('%H:%M')} 的消息...")
             poll_once(config_path, state_path, custom_start=custom_start, is_manual=True)
-        except queue.Empty:
-            pass
+        except Exception:
+            logger.exception("Error handling trigger: %s", trigger_msg[:50])
+            _reply_bot(my_user_id, "⚠️ 处理触发请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
 
     # Notify shutdown
     _reply_bot(my_user_id, "🔴 LarkListener 已停止")

@@ -34,6 +34,35 @@ def test_load_config_missing_file():
         load_config("/nonexistent/path/config.yaml")
 
 
+def test_load_config_missing_user_id_raises(tmp_path):
+    """Missing notify.user_id should raise a clear ValueError, not a later KeyError."""
+    bad = """\
+ai:
+  provider: claude
+  model: claude-sonnet-4-6
+notify:
+  bot_chat_id: oc_test
+"""
+    config_file = tmp_path / "bad.yaml"
+    config_file.write_text(bad)
+    with pytest.raises(ValueError, match="notify.user_id"):
+        load_config(str(config_file))
+
+
+def test_load_config_missing_ai_provider_raises(tmp_path):
+    bad = """\
+ai:
+  model: claude-sonnet-4-6
+notify:
+  user_id: ou_test
+  bot_chat_id: oc_test
+"""
+    config_file = tmp_path / "bad2.yaml"
+    config_file.write_text(bad)
+    with pytest.raises(ValueError, match="ai.provider"):
+        load_config(str(config_file))
+
+
 def test_load_config_defaults(tmp_path):
     """Config with only required fields gets defaults for optional ones."""
     minimal = """\

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from lark_listener.fetcher import MessageCategory
+
+logger = logging.getLogger("lark_listener")
 
 SYSTEM_PROMPT = "你是消息分析助手。请严格输出 JSON 数组，不要输出其他内容。"
 
@@ -39,6 +42,26 @@ MSG_TYPE_LABELS = {
     "location": "[位置]",
     "merge_forward": "[合并转发]",
 }
+
+
+def _extract_json(text: str) -> Any:
+    """Parse JSON from an LLM response, tolerating markdown fences and prose.
+
+    Models often wrap output in ```json ... ``` or add explanatory text, which
+    breaks a bare json.loads. Strip common fences first, then fall back to the
+    first JSON array/object substring.
+    """
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
+        if m:
+            return json.loads(m.group(1))
+        raise
 
 
 def _parse_card(content: str) -> tuple[str, str]:
@@ -150,7 +173,13 @@ class Analyzer:
             conversations="\n\n".join(conv_texts),
         )
 
-        raw_results = self._call_ai(user_prompt)
+        try:
+            raw_results = self._call_ai(user_prompt)
+        except Exception:
+            # AI failure (network, malformed JSON, etc.) must not drop the whole
+            # summary — degrade gracefully to no per-conversation analysis.
+            logger.exception("AI analysis failed, sending summary without it")
+            return {}
 
         results = {}
         for item in raw_results:
@@ -184,7 +213,7 @@ class Analyzer:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return json.loads(response.content[0].text)
+        return _extract_json(response.content[0].text)
 
     def _call_openai(self, user_prompt: str) -> list[dict]:
         import openai
@@ -200,7 +229,7 @@ class Analyzer:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return json.loads(response.choices[0].message.content)
+        return _extract_json(response.choices[0].message.content)
 
     def _call_ollama(self, user_prompt: str) -> list[dict]:
         url = (self.base_url or "http://localhost:11434") + "/api/chat"
@@ -218,4 +247,4 @@ class Analyzer:
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
-        return json.loads(data["message"]["content"])
+        return _extract_json(data["message"]["content"])

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
-import copy
-from datetime import datetime, timezone
+import logging
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 MAX_PROCESSED_IDS = 1000
+
+logger = logging.getLogger("lark_listener")
 
 
 class State:
@@ -22,24 +25,36 @@ class State:
     def _load(self):
         if not self._path.exists():
             return
-        with open(self._path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if data.get("last_poll_time"):
-            self.last_poll_time = datetime.fromisoformat(data["last_poll_time"])
-        ids = data.get("processed_message_ids", [])
-        self._ordered_ids = ids
-        self.processed_message_ids = set(ids)
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("last_poll_time"):
+                self.last_poll_time = datetime.fromisoformat(data["last_poll_time"])
+            ids = data.get("processed_message_ids", [])
+            self._ordered_ids = list(ids)
+            self.processed_message_ids = set(ids)
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            # Corrupt or unreadable state must not crash startup — start fresh.
+            logger.warning("State file unreadable (%s), starting fresh: %s", self._path, e)
+            self.last_poll_time = None
+            self._ordered_ids = []
+            self.processed_message_ids = set()
 
     def save(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        capped = self._ordered_ids[-MAX_PROCESSED_IDS:]
         data = {
             "last_poll_time": self.last_poll_time.isoformat() if self.last_poll_time else None,
-            "processed_message_ids": self._ordered_ids[-MAX_PROCESSED_IDS:],
+            "processed_message_ids": capped,
         }
-        with open(self._path, "w", encoding="utf-8") as f:
+        # Atomic write: write to a temp file then replace, so a crash mid-write
+        # can never leave a half-written (corrupt) state.json behind.
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self._path)
         # Sync in-memory set with capped list
-        self.processed_message_ids = set(self._ordered_ids[-MAX_PROCESSED_IDS:])
+        self.processed_message_ids = set(capped)
 
     def add_processed_ids(self, ids: list[str]):
         for msg_id in ids:

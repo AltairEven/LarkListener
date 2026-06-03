@@ -279,14 +279,14 @@ def test_notify_sends_message_and_notification(mock_run):
     # Should call subprocess twice: lark-cli send + terminal-notifier
     assert mock_run.call_count == 2
 
-    # First call: lark-cli im +messages-send
+    # First call: lark-cli im +messages-send (resolved to an absolute path)
     first_call_args = mock_run.call_args_list[0][0][0]
-    assert "lark-cli" in first_call_args
+    assert first_call_args[0].endswith("lark-cli")
     assert "--markdown" in first_call_args
 
-    # Second call: terminal-notifier
+    # Second call: terminal-notifier (resolved to an absolute path)
     second_call_args = mock_run.call_args_list[1][0][0]
-    assert "terminal-notifier" in second_call_args
+    assert second_call_args[0].endswith("terminal-notifier")
 
 
 @patch("lark_listener.notifier.subprocess.run")

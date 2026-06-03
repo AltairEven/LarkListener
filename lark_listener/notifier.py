@@ -5,6 +5,7 @@ import subprocess
 from typing import Any, Optional
 
 from lark_listener.analyzer import ConversationAnalysis, format_msg_content
+from lark_listener.binaries import resolve_executable
 from lark_listener.fetcher import MessageCategory
 
 URGENCY_ICON = {
@@ -32,18 +33,13 @@ def _group_by_chat(
                     "category": cat,
                     "messages": [],
                     "chat_name": "",
-                    "partner_name": "",
                     "matched_keyword": msg.get("matched_keyword", ""),
                 }
             groups[chat_id]["messages"].append(msg)
-            # Try to get chat/partner name
-            if cat == MessageCategory.P2P:
-                sender = msg.get("sender", {})
-                if sender.get("id") != msg.get("_my_user_id"):
-                    groups[chat_id]["partner_name"] = sender.get("name", "")
-            else:
-                if msg.get("chat_name"):
-                    groups[chat_id]["chat_name"] = msg["chat_name"]
+            # Capture the group name (p2p partner name is resolved later in
+            # _format_conversation directly from the messages).
+            if cat != MessageCategory.P2P and msg.get("chat_name"):
+                groups[chat_id]["chat_name"] = msg["chat_name"]
     return groups
 
 
@@ -188,7 +184,7 @@ class Notifier:
 
     def _send_bot_message(self, markdown: str):
         cmd = [
-            "lark-cli", "im", "+messages-send",
+            resolve_executable("lark-cli"), "im", "+messages-send",
             "--user-id", self.user_id,
             "--markdown", markdown,
             "--as", "bot",
@@ -221,7 +217,7 @@ class Notifier:
         open_url = f"https://applink.feishu.cn/client/chat/open?openChatId={self.bot_chat_id}"
 
         cmd = [
-            "terminal-notifier",
+            resolve_executable("terminal-notifier"),
             "-title", "LarkListener",
             "-subtitle", "有新消息汇总",
             "-message", message,

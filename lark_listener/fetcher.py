@@ -6,6 +6,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
+from lark_listener.binaries import resolve_executable
+
 
 class MessageCategory(Enum):
     P2P = "p2p"
@@ -88,8 +90,11 @@ class Fetcher:
         context: dict[str, list[dict[str, Any]]] = {}
         for chat_id, matched_ids in chat_matched_ids.items():
             all_msgs = self._search(start, end, chat_id=chat_id)
-            # Keep up to `limit` messages, excluding already matched ones
+            # Keep up to `limit` most recent messages, excluding already matched
+            # ones. Sort by time before truncating so we keep the latest, not
+            # whatever order lark-cli happened to return.
             ctx_msgs = [m for m in all_msgs if m["message_id"] not in matched_ids]
+            ctx_msgs.sort(key=lambda m: m.get("create_time", ""))
             ctx_msgs = ctx_msgs[-limit:]
             if ctx_msgs:
                 context[chat_id] = ctx_msgs
@@ -125,7 +130,7 @@ class Fetcher:
         for identity in ("user", "bot"):
             try:
                 proc = subprocess.run(
-                    ["lark-cli", "im", "chats", "get",
+                    [resolve_executable("lark-cli"), "im", "chats", "get",
                      "--params", json.dumps({"chat_id": chat_id}),
                      "--as", identity,
                      "--jq", ".data.name"],
@@ -149,7 +154,7 @@ class Fetcher:
         chat_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         cmd = [
-            "lark-cli", "im", "+messages-search",
+            resolve_executable("lark-cli"), "im", "+messages-search",
             "--start", start.replace(microsecond=0).isoformat(),
             "--end", end.replace(microsecond=0).isoformat(),
             "--format", "json",
@@ -164,11 +169,18 @@ class Fetcher:
         if chat_id:
             cmd.extend(["--chat-id", chat_id])
 
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except (subprocess.TimeoutExpired, OSError):
+            return []
         if proc.returncode != 0:
             return []
 
-        data = json.loads(proc.stdout)
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            # lark-cli succeeded but emitted non-JSON (warning, empty, etc.)
+            return []
         if not data.get("ok"):
             return []
 

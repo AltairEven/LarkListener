@@ -46,3 +46,26 @@ def test_state_is_processed(tmp_path):
     state.add_processed_ids(["msg_001"])
     assert state.is_processed("msg_001") is True
     assert state.is_processed("msg_999") is False
+
+
+def test_state_corrupt_file_starts_fresh(tmp_path):
+    """A corrupt state.json must not crash startup — start fresh instead."""
+    path = tmp_path / "state.json"
+    path.write_text("{ this is not valid json", encoding="utf-8")
+    state = State(str(path))  # must not raise
+    assert state.last_poll_time is None
+    assert state.processed_message_ids == set()
+    # And it should be able to recover by saving valid state afterwards
+    state.add_processed_ids(["msg_001"])
+    state.save()
+    assert State(str(path)).processed_message_ids == {"msg_001"}
+
+
+def test_state_save_is_atomic_no_tmp_left(tmp_path):
+    """Atomic save should not leave a .tmp file behind."""
+    path = tmp_path / "state.json"
+    state = State(str(path))
+    state.add_processed_ids(["msg_001"])
+    state.save()
+    assert not (tmp_path / "state.json.tmp").exists()
+    assert json.loads(path.read_text())["processed_message_ids"] == ["msg_001"]

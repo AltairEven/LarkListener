@@ -491,3 +491,72 @@ def test_fetch_no_keywords(mock_run):
     assert len(result[MessageCategory.KEYWORD]) == 0
     # Only 2 subprocess calls (p2p + at_me), no keyword search
     assert mock_run.call_count == 2
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_tolerates_non_json_output(mock_run):
+    """lark-cli returns 0 but emits non-JSON: must not crash, treat as empty."""
+    def side_effect(*args, **kwargs):
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = "Warning: something happened\nnot json"
+        return mock
+
+    mock_run.side_effect = side_effect
+    fetcher = Fetcher(keywords=["部署"])
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert all(len(msgs) == 0 for msgs in result.values())
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_tolerates_subprocess_timeout(mock_run):
+    """A lark-cli timeout must not crash the poll cycle."""
+    import subprocess as _sp
+    mock_run.side_effect = _sp.TimeoutExpired(cmd="lark-cli", timeout=60)
+    fetcher = Fetcher(keywords=["部署"])
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert all(len(msgs) == 0 for msgs in result.values())
+
+
+# --- fetch_context tests (#12) ---
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_keeps_latest_after_sorting(mock_run):
+    """Context must be sorted by create_time before truncation, so the most
+    recent messages are kept regardless of lark-cli's return order."""
+    # lark-cli returns out-of-order messages (incl. the matched one)
+    unordered = [
+        {"message_id": "a", "chat_id": "oc_x", "create_time": "300",
+         "sender": {"id": "ou_1", "name": "A"}, "msg_type": "text", "content": "a"},
+        {"message_id": "m_match", "chat_id": "oc_x", "create_time": "500",
+         "sender": {"id": "ou_1", "name": "A"}, "msg_type": "text", "content": "matched"},
+        {"message_id": "c", "chat_id": "oc_x", "create_time": "900",
+         "sender": {"id": "ou_1", "name": "A"}, "msg_type": "text", "content": "c"},
+        {"message_id": "b", "chat_id": "oc_x", "create_time": "100",
+         "sender": {"id": "ou_1", "name": "A"}, "msg_type": "text", "content": "b"},
+    ]
+    mock_run.side_effect = _mock_run([_make_search_result(unordered)])
+
+    fetcher = Fetcher()
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.KEYWORD] = [
+        {"message_id": "m_match", "chat_id": "oc_x", "create_time": "500"}
+    ]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        limit=2,
+    )
+    # Excludes m_match; of [a(300), c(900), b(100)] the latest 2 are a and c
+    ids = [m["message_id"] for m in context["oc_x"]]
+    assert ids == ["a", "c"]
