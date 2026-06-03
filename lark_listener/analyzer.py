@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import urllib.request
 from dataclasses import dataclass
@@ -42,6 +43,22 @@ MSG_TYPE_LABELS = {
     "location": "[位置]",
     "merge_forward": "[合并转发]",
 }
+
+
+def estimate_ai_seconds(num_messages: int) -> int:
+    """Rough estimate of AI analysis time in seconds.
+
+    Linear fit from measurements (~10s for 1 message, ~55s for 74), capped at
+    180s to avoid absurd estimates for huge batches.
+    """
+    return min(180, round(10 + 0.6 * num_messages))
+
+
+def format_duration(seconds: int) -> str:
+    """Human-readable duration. Caller adds the '约' prefix where needed."""
+    if seconds < 60:
+        return f"{seconds} 秒"
+    return f"{math.ceil(seconds / 60)} 分钟"
 
 
 def _extract_json(text: str) -> Any:

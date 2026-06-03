@@ -7,8 +7,38 @@ from lark_listener.analyzer import (
     format_msg_content,
     _parse_card,
     _extract_json,
+    estimate_ai_seconds,
+    format_duration,
 )
 from lark_listener.fetcher import MessageCategory
+
+
+# --- estimate_ai_seconds / format_duration tests ---
+
+
+def test_estimate_ai_seconds_zero():
+    assert estimate_ai_seconds(0) == 10
+
+
+def test_estimate_ai_seconds_fit_points():
+    # round(10 + 0.6*1) = 11 ; round(10 + 0.6*74) = 54  (实测 ~10s / ~55s)
+    assert estimate_ai_seconds(1) == 11
+    assert estimate_ai_seconds(74) == 54
+
+
+def test_estimate_ai_seconds_capped():
+    assert estimate_ai_seconds(100000) == 180
+
+
+def test_format_duration_seconds():
+    assert format_duration(45) == "45 秒"
+    assert format_duration(59) == "59 秒"
+
+
+def test_format_duration_minutes_rounds_up():
+    assert format_duration(60) == "1 分钟"
+    assert format_duration(61) == "2 分钟"
+    assert format_duration(120) == "2 分钟"
 
 
 # --- _extract_json tests ---

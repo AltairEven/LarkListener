@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from lark_listener.analyzer import Analyzer
+from lark_listener.analyzer import Analyzer, estimate_ai_seconds, format_duration
 from lark_listener.binaries import ensure_path, resolve_executable
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
@@ -125,6 +125,20 @@ def _reply_bot(user_id: str, text: str):
         logger.exception("Failed to send bot reply")
 
 
+def _add_reaction(message_id: str, emoji_type: str = "Get"):
+    """Add an emoji reaction to a message via bot. Best-effort (failures logged)."""
+    try:
+        subprocess.run(
+            [resolve_executable("lark-cli"), "im", "reactions", "create",
+             "--as", "bot",
+             "--params", json.dumps({"message_id": message_id}),
+             "--data", json.dumps({"reaction_type": {"emoji_type": emoji_type}})],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        logger.exception("Failed to add reaction to %s", message_id)
+
+
 def _handle_signal(signum, frame):
     global _running
     logger.info("Received signal %s, shutting down...", signum)
@@ -183,7 +197,12 @@ def _bot_listener():
                     continue
                 try:
                     # Raw event format: event.message.content = '{"text":"..."}'
-                    msg_content = event.get("event", {}).get("message", {}).get("content", "")
+                    message = event.get("event", {}).get("message", {})
+                    # Immediately add a GET reaction as a "received" acknowledgement
+                    message_id = message.get("message_id", "")
+                    if message_id:
+                        _add_reaction(message_id)
+                    msg_content = message.get("content", "")
                     try:
                         content = json.loads(msg_content).get("text", "")
                     except (json.JSONDecodeError, AttributeError):
@@ -243,6 +262,13 @@ def poll_once(
             state.last_poll_time = now
             state.save()
         return
+
+    # Manual trigger: report how many relevant messages were found and the
+    # rough AI analysis time, so the user knows how long to wait.
+    if is_manual:
+        est = estimate_ai_seconds(total)
+        period = f"{start.strftime('%m-%d %H:%M')} ~ {end.strftime('%H:%M')}"
+        _reply_bot(my_user_id, f"📊 {period} 找到 {total} 条相关消息，预计分析约 {format_duration(est)}")
 
     # Fetch context messages for richer AI analysis
     context_limit = config.get("context_messages", 20)
@@ -345,14 +371,12 @@ def main():
             if not is_trigger:
                 logger.info("Message not a trigger: %s", trigger_msg[:50])
                 continue
-            now = datetime.now(TZ)
+            # The GET reaction (added on receipt) already acknowledges the
+            # request; poll_once then sends the "found N, est X" progress note.
             if custom_start:
                 logger.info("Trigger with custom start: %s", custom_start.isoformat())
-                _reply_bot(my_user_id, f"⏳ 正在汇总 {custom_start.strftime('%m-%d %H:%M')} ~ {now.strftime('%H:%M')} 的消息...")
             else:
-                start = State(state_path).last_poll_time or (now - timedelta(seconds=config.get("poll_interval", 300)))
                 logger.info("Trigger with default time range")
-                _reply_bot(my_user_id, f"⏳ 正在汇总 {start.strftime('%m-%d %H:%M')} ~ {now.strftime('%H:%M')} 的消息...")
             poll_once(config_path, state_path, custom_start=custom_start, is_manual=True)
         except Exception:
             logger.exception("Error handling trigger: %s", trigger_msg[:50])
