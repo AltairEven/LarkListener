@@ -316,6 +316,30 @@ def test_notify_macos_notification_counts(mock_run):
 
 
 @patch("lark_listener.notifier.subprocess.run")
+def test_notify_survives_failing_desktop_notification(mock_run):
+    """A missing/failing terminal-notifier must NOT crash notify.
+
+    The bot message is the primary channel and is sent first; the macOS toast is
+    secondary. If notify() raised here it would abort the poll cycle before the
+    caller can advance state.last_poll_time, freezing the summary start time.
+    """
+    def side_effect(cmd, *args, **kwargs):
+        if cmd[0].endswith("terminal-notifier"):
+            raise FileNotFoundError(2, "No such file or directory", "terminal-notifier")
+        return MagicMock(returncode=0, stdout='{"ok": true}')
+
+    mock_run.side_effect = side_effect
+    notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
+
+    # Must not raise even though the desktop notification fails.
+    notifier.notify(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", my_user_id=MY_USER_ID)
+
+    # The bot message (primary channel) must still have been sent.
+    first_call_args = mock_run.call_args_list[0][0][0]
+    assert first_call_args[0].endswith("lark-cli")
+
+
+@patch("lark_listener.notifier.subprocess.run")
 def test_notify_skips_only_self_messages(mock_run):
     """Should not send notification if all messages are from self."""
     messages = {

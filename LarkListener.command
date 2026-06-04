@@ -63,6 +63,15 @@ _install() {
 
     echo ""
 
+    # Stop a running instance before replacing the binary: overwriting a live
+    # executable on macOS fails with "Text file busy" (and set -e would abort
+    # the script), and risks corrupting the running process. No-op on first install.
+    if _is_running; then
+        echo "停止运行中的服务..."
+        _stop
+        echo ""
+    fi
+
     # Copy binary
     mkdir -p "$LISTENER_HOME/logs"
     cp "$BINARY" "$LISTENER_HOME/lark-listener"

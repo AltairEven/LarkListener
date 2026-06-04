@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from typing import Any, Optional
 
 from lark_listener.analyzer import ConversationAnalysis, format_msg_content
 from lark_listener.binaries import resolve_executable
 from lark_listener.fetcher import MessageCategory
+
+logger = logging.getLogger("lark_listener")
 
 URGENCY_ICON = {
     "urgent": "🔴",
@@ -223,4 +226,16 @@ class Notifier:
             "-message", message,
             "-open", open_url,
         ]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        # Best-effort: the desktop toast is a secondary channel (the bot message
+        # is the primary delivery and was already sent above). A missing
+        # terminal-notifier or any subprocess failure must NOT propagate — it
+        # would abort the poll cycle before the caller advances last_poll_time,
+        # freezing the summary start time across restarts.
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except Exception as e:
+            logger.warning(
+                "Desktop notification skipped (%s). "
+                "Install it with: brew install terminal-notifier",
+                e,
+            )
