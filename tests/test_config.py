@@ -82,3 +82,22 @@ notify:
 
     assert config["poll_interval"] == 300  # default
     assert config["ai"]["base_url"] == ""  # default
+
+
+def test_load_config_list_fields_default_empty(tmp_path):
+    """Optional list fields absent from the file default to [] so the bot can
+    add the first entry (otherwise they'd be rejected as unknown fields)."""
+    minimal = """\
+ai:
+  provider: claude
+  model: claude-sonnet-4-6
+notify:
+  user_id: ou_test
+  bot_chat_id: oc_test
+"""
+    config_file = tmp_path / "minimal.yaml"
+    config_file.write_text(minimal)
+    config = load_config(str(config_file))
+
+    assert config["keywords"] == []
+    assert config["exclude_chat_ids"] == []

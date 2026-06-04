@@ -9,6 +9,11 @@ DEFAULTS = {
     "poll_interval": 300,
     "include_at_all": True,
     "context_messages": 20,
+    # Optional list fields default to [] so they're always present in the
+    # effective config — this lets the bot add the first entry instead of
+    # rejecting them as unknown fields.
+    "keywords": [],
+    "exclude_chat_ids": [],
     "ai": {
         "base_url": "",
     },

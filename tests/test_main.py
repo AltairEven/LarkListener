@@ -75,48 +75,6 @@ def test_poll_once_no_messages_skips_analysis(MockFetcher, MockAnalyzer, MockNot
     mock_notifier.notify.assert_not_called()
 
 
-# --- _parse_trigger_with_ai robustness (#6) ---
-
-import json as _json
-from lark_listener.main import _parse_trigger_with_ai
-
-_OLLAMA_CONFIG = {"ai": {"provider": "ollama", "model": "x", "api_key": "", "base_url": ""}}
-
-
-def _mock_ollama(mock_urlopen, content_obj):
-    resp = MagicMock()
-    resp.read.return_value = _json.dumps(
-        {"message": {"content": _json.dumps(content_obj)}}
-    ).encode()
-    mock_urlopen.return_value.__enter__.return_value = resp
-
-
-@patch("urllib.request.urlopen")
-def test_trigger_invalid_start_time_still_triggers(mock_urlopen):
-    """is_trigger=true with an unparseable start_time should keep the trigger,
-    falling back to the default time range (start_time=None) instead of dropping it."""
-    _mock_ollama(mock_urlopen, {"is_trigger": True, "start_time": "not-a-date"})
-    is_trigger, start_time = _parse_trigger_with_ai("汇总最近的消息", _OLLAMA_CONFIG)
-    assert is_trigger is True
-    assert start_time is None
-
-
-@patch("urllib.request.urlopen")
-def test_trigger_valid_start_time_parsed(mock_urlopen):
-    _mock_ollama(mock_urlopen, {"is_trigger": True, "start_time": "2026-06-03T10:00:00+08:00"})
-    is_trigger, start_time = _parse_trigger_with_ai("汇总今天上午", _OLLAMA_CONFIG)
-    assert is_trigger is True
-    assert start_time is not None
-    assert start_time.hour == 10
-
-
-@patch("urllib.request.urlopen")
-def test_trigger_not_a_trigger(mock_urlopen):
-    _mock_ollama(mock_urlopen, {"is_trigger": False, "start_time": None})
-    is_trigger, start_time = _parse_trigger_with_ai("你好", _OLLAMA_CONFIG)
-    assert is_trigger is False
-
-
 # --- _add_reaction tests (组件1) ---
 
 import json as _json2
@@ -223,3 +181,133 @@ def test_poll_once_auto_no_progress(MockFetcher, MockAnalyzer, MockNotifier, moc
     poll_once(config_path, state_path)  # is_manual=False
 
     assert not any("找到" in c.args[1] for c in mock_reply.call_args_list)
+
+
+# --- _handle_message dispatch ---
+
+import lark_listener.main as main_mod
+from lark_listener.intent import Intent
+from lark_listener.config_editor import ApplyResult
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.poll_once")
+def test_dispatch_summary_calls_poll(mock_poll, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="summary", start_time=None)
+    main_mod._handle_message("汇总", "ou_anyone", config_path, state_path)
+    mock_poll.assert_called_once()
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_dispatch_config_rejects_non_owner(mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="config_view")
+    main_mod._handle_message("当前配置", "ou_stranger", config_path, state_path)
+    mock_reply.assert_called_once()
+    assert "仅本人" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_dispatch_config_modify_sets_pending(mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._pending_change = None
+    mock_parse.return_value = Intent(
+        type="config_modify",
+        changes=[{"field": "poll_interval", "op": "set", "value": 600}])
+    main_mod._handle_message("轮询间隔改成10分钟", "ou_test", config_path, state_path)
+    assert main_mod._pending_change is not None
+    assert "确认" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.apply_changes")
+def test_dispatch_confirm_applies_pending(mock_apply, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._pending_change = {"changes": [{"field": "poll_interval", "op": "set", "value": 600}], "diff": "x"}
+    mock_apply.return_value = ApplyResult(True, diff="poll_interval: 60 → 600")
+    mock_parse.return_value = Intent(type="confirm")
+    main_mod._handle_message("确认", "ou_test", config_path, state_path)
+    mock_apply.assert_called_once()
+    assert main_mod._pending_change is None
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_dispatch_confirm_without_pending(mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._pending_change = None
+    mock_parse.return_value = Intent(type="confirm")
+    main_mod._handle_message("确认", "ou_test", config_path, state_path)
+    assert "没有待确认" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.render_config", return_value="CFG_TEXT")
+def test_dispatch_config_view_replies_config(mock_render, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="config_view")
+    main_mod._handle_message("当前配置", "ou_test", config_path, state_path)
+    assert mock_reply.call_args.args[1] == "CFG_TEXT"
+    assert mock_reply.call_args.kwargs.get("markdown") is True  # rendered as code block
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.render_help", return_value="HELP_TEXT")
+def test_dispatch_config_help_replies_help(mock_render, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="config_help")
+    main_mod._handle_message("帮助", "ou_test", config_path, state_path)
+    assert mock_reply.call_args.args[1] == "HELP_TEXT"
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.compute_diff", return_value=(None, "poll_interval 需为正整数"))
+def test_dispatch_config_modify_error_preserves_pending(mock_diff, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    prior = {"changes": [{"field": "poll_interval", "op": "set", "value": 600}], "diff": "old"}
+    main_mod._pending_change = prior
+    mock_parse.return_value = Intent(type="config_modify", changes=[{"field": "poll_interval", "op": "set", "value": -1}])
+    main_mod._handle_message("轮询间隔改成-1", "ou_test", config_path, state_path)
+    assert main_mod._pending_change == prior  # prior valid pending untouched
+    assert "正整数" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.apply_changes")
+def test_dispatch_confirm_apply_failure_replies_error(mock_apply, mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._pending_change = {"changes": [{"field": "poll_interval", "op": "set", "value": 600}], "diff": "x"}
+    mock_apply.return_value = ApplyResult(False, error="写入失败")
+    mock_parse.return_value = Intent(type="confirm")
+    main_mod._handle_message("确认", "ou_test", config_path, state_path)
+    assert main_mod._pending_change is None
+    assert "写入失败" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_dispatch_cancel_with_pending_clears(mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._pending_change = {"changes": [], "diff": "x"}
+    mock_parse.return_value = Intent(type="cancel")
+    main_mod._handle_message("取消", "ou_test", config_path, state_path)
+    assert main_mod._pending_change is None
+    assert "已取消" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_dispatch_error_replies_not_understood(mock_parse, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="error")
+    main_mod._handle_message("???", "ou_test", config_path, state_path)
+    assert "帮助" in mock_reply.call_args.args[1]

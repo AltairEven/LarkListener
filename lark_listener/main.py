@@ -13,6 +13,7 @@ from typing import Optional
 
 from lark_listener.analyzer import Analyzer, estimate_ai_seconds, format_duration
 from lark_listener.binaries import ensure_path, resolve_executable
+from lark_listener import config_editor, intent
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
 from lark_listener.notifier import Notifier
@@ -28,97 +29,24 @@ logger = logging.getLogger("lark_listener")
 
 _running = True
 _listener_proc: Optional[subprocess.Popen] = None
-_trigger_queue: queue.Queue[Optional[str]] = queue.Queue()
-
-TRIGGER_PROMPT = """\
-当前时间：{now}
-
-你是消息助手的意图识别模块。用户给 Bot 发了一条消息，请判断用户是否想要汇总/总结消息。
-
-用户消息："{message}"
-
-请严格输出 JSON，不要输出其他内容：
-- 如果用户想汇总消息且指定了时间范围，输出：{{"is_trigger": true, "start_time": "ISO 8601 格式，带 +08:00 时区"}}
-- 如果用户想汇总消息但没指定时间，输出：{{"is_trigger": true, "start_time": null}}
-- 如果用户不是想汇总消息，输出：{{"is_trigger": false, "start_time": null}}
-
-示例：
-- "汇总今天上午的消息" → {{"is_trigger": true, "start_time": "{today}T00:00:00+08:00"}}
-- "帮我看看最近2小时有什么消息" → {{"is_trigger": true, "start_time": "{two_hours_ago}"}}
-- "总结一下" → {{"is_trigger": true, "start_time": null}}
-- "你好" → {{"is_trigger": false, "start_time": null}}"""
+_trigger_queue: queue.Queue[Optional[tuple[str, str]]] = queue.Queue()
+_pending_change: Optional[dict] = None
 
 
-def _parse_trigger_with_ai(message: str, config: dict) -> tuple[bool, Optional[datetime]]:
-    """Use AI to determine if message is a summary trigger and extract time."""
-    ai_cfg = config["ai"]
-    api_key = ai_cfg.get("api_key", "")
-    now = datetime.now(TZ)
-    prompt = TRIGGER_PROMPT.format(
-        now=now.isoformat(),
-        message=message,
-        today=now.strftime("%Y-%m-%d"),
-        two_hours_ago=(now - timedelta(hours=2)).isoformat(),
-    )
+def _reply_bot(user_id: str, text: str, markdown: bool = False):
+    """Send a reply to the user via bot.
 
-    try:
-        if ai_cfg["provider"] == "openai":
-            import openai
-            client = openai.OpenAI(api_key=api_key, base_url=ai_cfg.get("base_url") or None)
-            response = client.chat.completions.create(
-                model=ai_cfg["model"],
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = json.loads(response.choices[0].message.content)
-        elif ai_cfg["provider"] == "claude":
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model=ai_cfg["model"],
-                max_tokens=256,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = json.loads(response.content[0].text)
-        elif ai_cfg["provider"] == "ollama":
-            import urllib.request
-            url = (ai_cfg.get("base_url") or "http://localhost:11434") + "/api/chat"
-            payload = json.dumps({
-                "model": ai_cfg["model"], "stream": False,
-                "messages": [{"role": "user", "content": prompt}],
-            }).encode()
-            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read())
-            result = json.loads(data["message"]["content"])
-        else:
-            return False, None
-
-        is_trigger = result.get("is_trigger", False)
-        start_time = None
-        if is_trigger and result.get("start_time"):
-            try:
-                start_time = datetime.fromisoformat(result["start_time"])
-            except (ValueError, TypeError):
-                # Keep the trigger; just fall back to the default time range
-                # instead of silently dropping the user's request.
-                logger.warning("Invalid start_time from AI: %r", result.get("start_time"))
-        return is_trigger, start_time
-    except Exception:
-        logger.exception("Failed to parse trigger from message: %s", message)
-
-    return False, None
-
-
-def _reply_bot(user_id: str, text: str):
-    """Send a text reply to the user via bot.
+    markdown=True sends as a post message so fenced code blocks render (used for
+    the config view); otherwise plain text.
 
     Best-effort: a failed notification (lark-cli missing, timeout, network) must
     never crash the service or, under launchd KeepAlive, trigger a restart loop.
     """
+    content_flag = "--markdown" if markdown else "--text"
     try:
         subprocess.run(
             [resolve_executable("lark-cli"), "im", "+messages-send",
-             "--user-id", user_id, "--text", text, "--as", "bot"],
+             "--user-id", user_id, content_flag, text, "--as", "bot"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -198,10 +126,11 @@ def _bot_listener():
                 try:
                     # Raw event format: event.message.content = '{"text":"..."}'
                     message = event.get("event", {}).get("message", {})
-                    # Immediately add a GET reaction as a "received" acknowledgement
                     message_id = message.get("message_id", "")
                     if message_id:
                         _add_reaction(message_id)
+                    sender = event.get("event", {}).get("sender", {})
+                    sender_id = sender.get("sender_id", {}).get("open_id", "")
                     msg_content = message.get("content", "")
                     try:
                         content = json.loads(msg_content).get("text", "")
@@ -211,7 +140,7 @@ def _bot_listener():
                     if not content:
                         continue
                     logger.info("Bot received message: %s", content[:100])
-                    _trigger_queue.put(content)
+                    _trigger_queue.put((content, sender_id))
                 except json.JSONDecodeError:
                     continue
 
@@ -313,6 +242,81 @@ def poll_once(
     logger.info("Summary sent successfully")
 
 
+def _handle_message(content: str, sender_id: str, config_path: str, state_path: str):
+    """Dispatch a bot message: summary trigger, or owner-only config operation."""
+    global _pending_change
+    config = load_config(config_path)
+    my_user_id = config["notify"]["user_id"]
+    parsed = intent.parse(content, config)
+
+    if parsed.type == "summary":
+        if parsed.start_time:
+            logger.info("Trigger with custom start: %s", parsed.start_time.isoformat())
+        else:
+            logger.info("Trigger with default time range")
+        poll_once(config_path, state_path, custom_start=parsed.start_time, is_manual=True)
+        return
+
+    if parsed.type == "none":
+        logger.info("Message not actionable: %s", content[:50])
+        return
+
+    if parsed.type == "error":
+        # AI parse failed (outage / bad JSON) — let the sender know it wasn't understood.
+        if sender_id:
+            _reply_bot(sender_id, "🤔 没太听懂，发「帮助」可查看用法。")
+        return
+
+    # Remaining types are config operations — owner only.
+    if sender_id != my_user_id:
+        if sender_id:
+            _reply_bot(sender_id, "⚠️ 仅本人可查看或修改配置")
+        else:
+            # No sender id to route a reply to — drop silently (already ack'd via reaction).
+            logger.info("Config op from unknown sender ignored")
+        return
+
+    if parsed.type == "config_view":
+        _reply_bot(my_user_id, config_editor.render_config(config), markdown=True)
+        return
+
+    if parsed.type == "config_help":
+        _reply_bot(my_user_id, config_editor.render_help())
+        return
+
+    if parsed.type == "config_modify":
+        diff, error = config_editor.compute_diff(parsed.changes or [], config)
+        if error:
+            _reply_bot(my_user_id, f"⚠️ {error}")
+            return
+        if not diff:
+            _reply_bot(my_user_id, "没有可修改的内容")
+            return
+        _pending_change = {"changes": parsed.changes, "diff": diff}
+        _reply_bot(my_user_id, f"将修改：\n{diff}\n回复「确认」生效，「取消」放弃。")
+        return
+
+    if parsed.type == "confirm":
+        if not _pending_change:
+            _reply_bot(my_user_id, "当前没有待确认的修改")
+            return
+        result = config_editor.apply_changes(config_path, _pending_change["changes"], config)
+        _pending_change = None
+        if result.ok:
+            _reply_bot(my_user_id, f"✅ 已更新，下次轮询生效：\n{result.diff}")
+        else:
+            _reply_bot(my_user_id, f"⚠️ 修改失败：{result.error}")
+        return
+
+    if parsed.type == "cancel":
+        if _pending_change:
+            _pending_change = None
+            _reply_bot(my_user_id, "已取消修改")
+        else:
+            _reply_bot(my_user_id, "当前没有待确认的修改")
+        return
+
+
 def main():
     ensure_path()
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -330,7 +334,7 @@ def main():
     interval = config.get("poll_interval", 300)
 
     # Notify startup
-    _reply_bot(my_user_id, f"✅ LarkListener 已启动（轮询间隔 {interval} 秒）")
+    _reply_bot(my_user_id, f"✅ LarkListener 已启动（轮询间隔 {interval} 秒）。发「帮助」可查看或修改配置。")
 
     # Start bot listener in background thread
     listener_thread = threading.Thread(target=_bot_listener, daemon=True)
@@ -354,33 +358,20 @@ def main():
 
         # Wait for interval or trigger
         try:
-            trigger_msg = _trigger_queue.get(timeout=interval)
+            item = _trigger_queue.get(timeout=interval)
         except queue.Empty:
             continue
-        if trigger_msg is None:
+        if item is None:
             break
+        content, sender_id = item
 
-        # Handle the trigger. A failure here (AI, network, lark-cli, bad config)
-        # must NOT crash the service — otherwise launchd KeepAlive restarts it
-        # into a "trigger → crash → restart" loop. Mirror the poll-cycle handling.
+        # A failure here (AI, network, lark-cli, bad config) must NOT crash the
+        # service — otherwise launchd KeepAlive restarts it into a crash loop.
         try:
-            # Use AI to determine intent and extract time
-            config = load_config(config_path)
-            my_user_id = config["notify"]["user_id"]
-            is_trigger, custom_start = _parse_trigger_with_ai(trigger_msg, config)
-            if not is_trigger:
-                logger.info("Message not a trigger: %s", trigger_msg[:50])
-                continue
-            # The GET reaction (added on receipt) already acknowledges the
-            # request; poll_once then sends the "found N, est X" progress note.
-            if custom_start:
-                logger.info("Trigger with custom start: %s", custom_start.isoformat())
-            else:
-                logger.info("Trigger with default time range")
-            poll_once(config_path, state_path, custom_start=custom_start, is_manual=True)
+            _handle_message(content, sender_id, config_path, state_path)
         except Exception:
-            logger.exception("Error handling trigger: %s", trigger_msg[:50])
-            _reply_bot(my_user_id, "⚠️ 处理触发请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
+            logger.exception("Error handling message: %s", content[:50])
+            _reply_bot(my_user_id, "⚠️ 处理请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
 
     # Notify shutdown
     _reply_bot(my_user_id, "🔴 LarkListener 已停止")
