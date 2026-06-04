@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from lark_listener.binaries import resolve_executable
+from lark_listener.binaries import lark_cli
 
 
 class MessageCategory(Enum):
@@ -130,10 +130,10 @@ class Fetcher:
         for identity in ("user", "bot"):
             try:
                 proc = subprocess.run(
-                    [resolve_executable("lark-cli"), "im", "chats", "get",
-                     "--params", json.dumps({"chat_id": chat_id}),
-                     "--as", identity,
-                     "--jq", ".data.name"],
+                    lark_cli("im", "chats", "get",
+                             "--params", json.dumps({"chat_id": chat_id}),
+                             "--as", identity,
+                             "--jq", ".data.name"),
                     capture_output=True, text=True, timeout=10,
                 )
                 if proc.returncode == 0:
@@ -153,21 +153,22 @@ class Fetcher:
         query: Optional[str] = None,
         chat_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        cmd = [
-            resolve_executable("lark-cli"), "im", "+messages-search",
+        args = [
+            "im", "+messages-search",
             "--start", start.replace(microsecond=0).isoformat(),
             "--end", end.replace(microsecond=0).isoformat(),
             "--format", "json",
             "--page-all",
         ]
         if chat_type:
-            cmd.extend(["--chat-type", chat_type])
+            args.extend(["--chat-type", chat_type])
         if is_at_me:
-            cmd.append("--is-at-me")
+            args.append("--is-at-me")
         if query:
-            cmd.extend(["--query", query])
+            args.extend(["--query", query])
         if chat_id:
-            cmd.extend(["--chat-id", chat_id])
+            args.extend(["--chat-id", chat_id])
+        cmd = lark_cli(*args)
 
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

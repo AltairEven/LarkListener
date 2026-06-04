@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from lark_listener.analyzer import Analyzer, estimate_ai_seconds, format_duration
-from lark_listener.binaries import ensure_path, resolve_executable
+from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
@@ -45,8 +45,8 @@ def _reply_bot(user_id: str, text: str, markdown: bool = False):
     content_flag = "--markdown" if markdown else "--text"
     try:
         subprocess.run(
-            [resolve_executable("lark-cli"), "im", "+messages-send",
-             "--user-id", user_id, content_flag, text, "--as", "bot"],
+            lark_cli("im", "+messages-send",
+                     "--user-id", user_id, content_flag, text, "--as", "bot"),
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -57,10 +57,10 @@ def _add_reaction(message_id: str, emoji_type: str = "Get"):
     """Add an emoji reaction to a message via bot. Best-effort (failures logged)."""
     try:
         subprocess.run(
-            [resolve_executable("lark-cli"), "im", "reactions", "create",
-             "--as", "bot",
-             "--params", json.dumps({"message_id": message_id}),
-             "--data", json.dumps({"reaction_type": {"emoji_type": emoji_type}})],
+            lark_cli("im", "reactions", "create",
+                     "--as", "bot",
+                     "--params", json.dumps({"message_id": message_id}),
+                     "--data", json.dumps({"reaction_type": {"emoji_type": emoji_type}})),
             capture_output=True, text=True, timeout=10,
         )
     except Exception:
@@ -99,12 +99,12 @@ def _bot_listener():
     while _running:
         try:
             proc = subprocess.Popen(
-                [
-                    resolve_executable("lark-cli"), "event", "+subscribe",
+                lark_cli(
+                    "event", "+subscribe",
                     "--event-types", "im.message.receive_v1",
                     "--as", "bot",
                     "--force",
-                ],
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -158,6 +158,7 @@ def poll_once(
     is_manual: bool = False,
 ):
     config = load_config(config_path)
+    set_lark_profile(config.get("lark_cli_appid"))
     state = State(state_path)
 
     now = datetime.now(TZ)
@@ -330,6 +331,9 @@ def main():
 
     # Load config for user_id
     config = load_config(config_path)
+    # Pin every lark-cli call to the configured bot before the listener thread
+    # starts or any startup message is sent.
+    set_lark_profile(config.get("lark_cli_appid"))
     my_user_id = config["notify"]["user_id"]
     interval = config.get("poll_interval", 300)
 

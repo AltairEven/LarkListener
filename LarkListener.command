@@ -78,6 +78,38 @@ _install() {
     chmod +x "$LISTENER_HOME/lark-listener"
     echo "✓ 已安装 lark-listener → $LISTENER_HOME/"
 
+    # Which lark-cli bot (appId) carries the service — a required field chosen at
+    # every install/reinstall. Two explicit options: (1) use the current active
+    # lark-cli profile (shown with its appId + brand + logged-in user), or (2)
+    # type a different appId by hand. No silent default. The chosen value is
+    # reused for the wizard's own lark-cli calls and the auth check, and synced
+    # back into the config.
+    ACTIVE_INFO=$(lark-cli profile list 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); p=next((x for x in d if x.get('active')), None); print('{}|{}|{}'.format(p.get('appId',''), p.get('user',''), p.get('brand','')) if p else '')" 2>/dev/null || echo "")
+    ACTIVE_APPID="${ACTIVE_INFO%%|*}"
+    _rest="${ACTIVE_INFO#*|}"
+    ACTIVE_USER="${_rest%%|*}"
+    ACTIVE_BRAND="${_rest##*|}"
+
+    echo ""
+    echo "=== 选择承载服务的 lark-cli bot（必填）==="
+    APP_ID=""
+    if [ -n "$ACTIVE_APPID" ]; then
+        echo "  1) 使用当前 active bot：${ACTIVE_APPID}（${ACTIVE_BRAND} / 登录用户: ${ACTIVE_USER}）"
+        echo "  2) 手动输入其他 appId"
+        read -p "请选择 (1/2): " BOT_CHOICE
+        if [ "$BOT_CHOICE" = "1" ]; then
+            APP_ID="$ACTIVE_APPID"
+        fi
+    else
+        echo "（未检测到 active profile，请手动输入；如未配置过请先运行 lark-cli config init）"
+    fi
+    # Manual entry: chose option 2, no active profile, or invalid choice.
+    while [ -z "$APP_ID" ]; do
+        read -p "请输入承载服务的 lark-cli appId（cli_xxx）: " APP_ID
+        APP_ID=$(echo "$APP_ID" | xargs)
+    done
+    echo "✓ 服务将使用 bot: $APP_ID"
+
     # Config wizard
     if [ ! -f "$LISTENER_HOME/config.yaml" ]; then
         echo ""
@@ -126,7 +158,7 @@ _install() {
         # Get user_id
         echo ""
         echo "获取你的飞书 user_id..."
-        USER_ID=$(lark-cli contact +get-user --jq '.data.user.open_id' 2>/dev/null | tr -d '"' || echo "")
+        USER_ID=$(lark-cli contact +get-user --jq '.data.user.open_id' --profile "$APP_ID" 2>/dev/null | tr -d '"' || echo "")
         if [ -n "$USER_ID" ] && [ "$USER_ID" != "null" ]; then
             echo "✓ 你的 user_id: $USER_ID"
         else
@@ -136,7 +168,7 @@ _install() {
         # Get bot_chat_id
         echo ""
         echo "获取 Bot chat_id（将发送一条测试消息）..."
-        BOT_SEND_RESULT=$(lark-cli im +messages-send --user-id "$USER_ID" --text "LarkListener 安装测试 ✅" --as bot 2>&1 || echo "")
+        BOT_SEND_RESULT=$(lark-cli im +messages-send --user-id "$USER_ID" --text "LarkListener 安装测试 ✅" --as bot --profile "$APP_ID" 2>&1 || echo "")
         BOT_CHAT_ID=$(echo "$BOT_SEND_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('chat_id',''))" 2>/dev/null || echo "")
         if [ -n "$BOT_CHAT_ID" ]; then
             echo "✓ Bot chat_id: $BOT_CHAT_ID"
@@ -148,6 +180,9 @@ _install() {
         cat > "$LISTENER_HOME/config.yaml" <<CONF
 # 轮询间隔（秒）
 poll_interval: $POLL_INTERVAL
+
+# 【必填】承载本服务的 lark-cli bot 的 appId（见 \`lark-cli profile list\`）
+lark_cli_appid: $APP_ID
 
 # 是否汇总 @所有人 的消息（关键词命中的仍会汇总）
 include_at_all: true
@@ -177,7 +212,16 @@ CONF
         echo ""
         echo "✓ 配置文件已生成"
     else
-        echo "✓ 配置文件已存在，跳过"
+        echo "✓ 配置文件已存在，保留其余配置"
+        # Sync the required lark_cli_appid to the chosen value: replace the
+        # existing key's value in place (preserving its comment), or append it
+        # as a top-level key if the file predates this field.
+        if grep -q '^lark_cli_appid:' "$LISTENER_HOME/config.yaml"; then
+            /usr/bin/sed -i '' "s|^lark_cli_appid:.*|lark_cli_appid: $APP_ID|" "$LISTENER_HOME/config.yaml"
+        else
+            printf '\n# 【必填】承载本服务的 lark-cli bot 的 appId\nlark_cli_appid: %s\n' "$APP_ID" >> "$LISTENER_HOME/config.yaml"
+        fi
+        echo "✓ lark_cli_appid = $APP_ID"
     fi
 
     # Write launchd plist
@@ -214,20 +258,43 @@ CONF
 PLIST
     echo "✓ 已写入 launchd 配置"
 
-    # Check lark-cli auth
+    # lark-cli authorization, targeted at the bot that carries the service via
+    # --profile "$APP_ID". The bot identity (send/react/listen) needs no login;
+    # message search needs the user-identity `search:message` scope, so that's
+    # what we authorize here. Login is initiated in-place when missing.
+    REQUIRED_SCOPE="search:message"
     echo ""
-    echo "检查 lark-cli 登录状态..."
-    if ! lark-cli contact +get-user --jq '.data.user.name' 2>/dev/null | grep -q .; then
-        echo "⚠️  lark-cli 未登录，请先完成登录："
-        echo "   lark-cli auth login --scope \"search:message\""
+    echo "检查 lark-cli 登录状态（bot: ${APP_ID}）..."
+    NEEDS_LOGIN=false
+    if ! lark-cli contact +get-user --jq '.data.user.name' --profile "$APP_ID" 2>/dev/null | grep -q .; then
+        echo "○ 该 bot 尚未登录 user 身份"
+        NEEDS_LOGIN=true
     else
-        USER_NAME=$(lark-cli contact +get-user --jq '.data.user.name' 2>/dev/null)
+        USER_NAME=$(lark-cli contact +get-user --jq '.data.user.name' --profile "$APP_ID" 2>/dev/null || echo "")
         echo "✓ 已登录: $USER_NAME"
-        if ! lark-cli im +messages-search --chat-type p2p --start "2020-01-01T00:00:00+08:00" --end "2020-01-01T00:01:00+08:00" --format json 2>&1 | grep -q '"ok": true'; then
-            echo "⚠️  缺少 search:message 权限，请运行："
-            echo "   lark-cli auth login --scope \"search:message\""
+        if ! lark-cli im +messages-search --chat-type p2p --start "2020-01-01T00:00:00+08:00" --end "2020-01-01T00:01:00+08:00" --format json --profile "$APP_ID" 2>&1 | grep -q '"ok": true'; then
+            echo "○ 缺少 $REQUIRED_SCOPE 权限"
+            NEEDS_LOGIN=true
         else
-            echo "✓ search:message 权限正常"
+            echo "✓ $REQUIRED_SCOPE 权限正常"
+        fi
+    fi
+
+    if [ "$NEEDS_LOGIN" = true ]; then
+        echo ""
+        echo "需要为该 bot 授权 user 身份（浏览器打开链接完成授权）："
+        echo "   lark-cli auth login --profile $APP_ID --scope \"$REQUIRED_SCOPE\""
+        echo ""
+        read -p "现在发起授权登录？(Y/n) " DO_LOGIN
+        DO_LOGIN=${DO_LOGIN:-Y}
+        if [ "$DO_LOGIN" = "Y" ] || [ "$DO_LOGIN" = "y" ]; then
+            if lark-cli auth login --profile "$APP_ID" --scope "$REQUIRED_SCOPE"; then
+                echo "✓ 授权完成"
+            else
+                echo "⚠️  授权未完成，稍后可手动重试上面的命令"
+            fi
+        else
+            echo "已跳过。服务需要该权限才能拉取消息，稍后请手动运行上面的命令。"
         fi
     fi
 
@@ -260,6 +327,27 @@ _start() {
         echo "❌ 未安装，请先选择「安装」"
         return
     fi
+
+    # Guarantee the service binds to the configured bot before starting. The
+    # binary pins every lark-cli call to lark_cli_appid via --profile, but only
+    # if that value is present — an empty one would fail validation each poll.
+    APP_ID=$(python3 -c "import yaml; print((yaml.safe_load(open('$LISTENER_HOME/config.yaml')) or {}).get('lark_cli_appid','') or '')" 2>/dev/null || echo "")
+    if [ -z "$APP_ID" ]; then
+        echo "❌ 配置缺少 lark_cli_appid，无法确定承载服务的 bot。"
+        echo "   请选择「5) 重新安装」设置，或编辑 ${LISTENER_HOME}/config.yaml"
+        return
+    fi
+    echo "本次服务将连接 bot: ${APP_ID}"
+
+    # Verify that bot is authorized for message search (user identity). Warn but
+    # still start — auth can be completed later and bot-side features still work.
+    if lark-cli im +messages-search --chat-type p2p --start "2020-01-01T00:00:00+08:00" --end "2020-01-01T00:01:00+08:00" --format json --profile "$APP_ID" 2>&1 | grep -q '"ok": true'; then
+        echo "✓ 该 bot 已授权 search:message"
+    else
+        echo "⚠️  该 bot 尚未授权 search:message（或登录已过期），可能拉不到消息："
+        echo "   lark-cli auth login --profile ${APP_ID} --scope \"search:message\""
+    fi
+
     if _is_running; then
         echo "正在重启..."
         _stop
@@ -267,7 +355,7 @@ _start() {
     launchctl load "$PLIST_PATH"
     sleep 3
     if _is_running; then
-        echo "✓ 服务已启动"
+        echo "✓ 服务已启动（已绑定 bot: ${APP_ID}）"
     else
         echo "❌ 启动失败，请查看日志:"
         echo "  cat $LISTENER_HOME/logs/stderr.log"

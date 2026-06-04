@@ -43,6 +43,11 @@ def _validate(config: dict) -> None:
         raise ValueError(
             "配置缺少必需字段 ai.provider / ai.model，请检查 ~/.lark_listener/config.yaml"
         )
+    if not config.get("lark_cli_appid"):
+        raise ValueError(
+            "配置缺少必需字段 lark_cli_appid（承载服务的 lark-cli bot appId，"
+            "见 `lark-cli profile list`），请检查 ~/.lark_listener/config.yaml"
+        )
 
 
 def load_config(path: Optional[str] = None) -> dict[str, Any]:

@@ -4,6 +4,7 @@ from lark_listener.config import load_config
 
 SAMPLE_CONFIG = """\
 poll_interval: 120
+lark_cli_appid: cli_test
 keywords:
   - 部署
   - 故障
@@ -63,9 +64,26 @@ notify:
         load_config(str(config_file))
 
 
+def test_load_config_missing_lark_cli_appid_raises(tmp_path):
+    """lark_cli_appid is required: it pins the service to a specific bot."""
+    bad = """\
+ai:
+  provider: claude
+  model: claude-sonnet-4-6
+notify:
+  user_id: ou_test
+  bot_chat_id: oc_test
+"""
+    config_file = tmp_path / "bad3.yaml"
+    config_file.write_text(bad)
+    with pytest.raises(ValueError, match="lark_cli_appid"):
+        load_config(str(config_file))
+
+
 def test_load_config_defaults(tmp_path):
     """Config with only required fields gets defaults for optional ones."""
     minimal = """\
+lark_cli_appid: cli_test
 keywords:
   - test
 ai:
@@ -88,6 +106,7 @@ def test_load_config_list_fields_default_empty(tmp_path):
     """Optional list fields absent from the file default to [] so the bot can
     add the first entry (otherwise they'd be rejected as unknown fields)."""
     minimal = """\
+lark_cli_appid: cli_test
 ai:
   provider: claude
   model: claude-sonnet-4-6

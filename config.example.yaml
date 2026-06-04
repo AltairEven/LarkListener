@@ -1,25 +1,44 @@
-# Polling interval in seconds
+# LarkListener 配置模板 —— 列出全部配置项。
+# 有默认值的项已填默认值；无默认值的项留空，需自行填写。
+
+# 【必填，无默认值】承载本服务的 lark-cli bot 的 appId（见 `lark-cli profile list`）。
+# 所有 lark-cli 调用会被钉死在这个 bot 上，不受全局 active profile 影响。
+lark_cli_appid:
+
+# 轮询间隔（秒）。默认 300。
 poll_interval: 300
 
-# Keywords to watch for in group messages
-keywords:
-  - 部署
-  - 故障
-  - 发版
+# 是否汇总 @所有人 的消息（命中关键词的仍会汇总）。默认 true。
+include_at_all: true
 
-# AI model configuration
+# AI 分析时为每个会话额外拉取的上下文消息数（0 表示不拉取）。默认 20。
+context_messages: 20
+
+# 关注的关键词（命中即汇总）。默认空列表。示例：
+#   keywords:
+#     - 部署
+#     - 故障
+keywords: []
+
+# 屏蔽的聊天 chat_id（这些聊天的消息不会被汇总）。默认空列表。示例：
+#   exclude_chat_ids:
+#     - oc_xxxxxxxxxxxx    # LarkListener Bot
+exclude_chat_ids: []
+
+# AI 模型配置
 ai:
-  provider: claude        # claude / openai / ollama
-  model: claude-sonnet-4-6
-  api_key: your-api-key-here
-  base_url: ""            # For openai-compatible or ollama endpoints
+  # 【必填，无默认值】AI 后端：claude / openai / ollama。
+  provider:
+  # 【必填，无默认值】模型名称（如 claude-sonnet-4-6 / gpt-4o / qwen2.5:7b）。
+  model:
+  # API Key（ollama 可留空）。无默认值。
+  api_key:
+  # 自定义 / 兼容端点的 base_url（openai 兼容或 ollama 用）。默认空字符串。
+  base_url: ""
 
-# Excluded chat IDs (messages from these chats will be ignored)
-exclude_chat_ids:
-  - oc_xxxxxxxxxxxx    # LarkListener Bot
-  - oc_xxxxxxxxxxxx    # System notifications
-
-# Notification target
+# 推送目标
 notify:
-  user_id: ou_xxxxxxxxxxxx
-  bot_chat_id: oc_xxxxxxxxxxxx
+  # 【必填，无默认值】接收汇总的用户 open_id（ou_xxx）。
+  user_id:
+  # Bot 与你的私聊 chat_id（oc_xxx）。无默认值。
+  bot_chat_id:

@@ -7,6 +7,7 @@ from lark_listener.fetcher import MessageCategory
 
 SAMPLE_CONFIG = """\
 poll_interval: 60
+lark_cli_appid: cli_test
 keywords:
   - 部署
 ai:

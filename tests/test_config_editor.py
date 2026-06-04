@@ -40,6 +40,7 @@ EFFECTIVE = {
     "include_at_all": True,
     "context_messages": 20,
     "keywords": ["部署", "故障"],
+    "lark_cli_appid": "cli_test",
     "ai": {"provider": "claude", "api_key": "secret"},
     "notify": {"user_id": "ou_test"},
 }
@@ -48,6 +49,15 @@ EFFECTIVE = {
 def test_protected_field_rejected():
     diff, err = config_editor.compute_diff(
         [{"field": "ai", "op": "set", "value": {}}], EFFECTIVE)
+    assert diff is None
+    assert "受保护" in err
+
+
+def test_lark_cli_appid_is_protected():
+    """Changing which bot carries the service needs a restart, so the bot must
+    not edit lark_cli_appid via chat."""
+    diff, err = config_editor.compute_diff(
+        [{"field": "lark_cli_appid", "op": "set", "value": "cli_other"}], EFFECTIVE)
     assert diff is None
     assert "受保护" in err
 

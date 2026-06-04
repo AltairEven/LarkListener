@@ -6,7 +6,7 @@ import subprocess
 from typing import Any, Optional
 
 from lark_listener.analyzer import ConversationAnalysis, format_msg_content
-from lark_listener.binaries import resolve_executable
+from lark_listener.binaries import lark_cli, resolve_executable
 from lark_listener.fetcher import MessageCategory
 
 logger = logging.getLogger("lark_listener")
@@ -186,12 +186,12 @@ class Notifier:
         self._send_macos_notification(categorized, my_user_id)
 
     def _send_bot_message(self, markdown: str):
-        cmd = [
-            resolve_executable("lark-cli"), "im", "+messages-send",
+        cmd = lark_cli(
+            "im", "+messages-send",
             "--user-id", self.user_id,
             "--markdown", markdown,
             "--as", "bot",
-        ]
+        )
         subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
     def _send_macos_notification(

@@ -8,7 +8,10 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-PROTECTED = {"ai", "notify"}
+# Infrastructure fields the bot must not change via chat: ai/notify hold secrets
+# and ids; lark_cli_appid picks which bot carries the service and only takes
+# effect on restart, so it stays a manual, file-only edit.
+PROTECTED = {"ai", "notify", "lark_cli_appid"}
 
 
 def _yaml() -> YAML:
