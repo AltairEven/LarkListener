@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import queue
@@ -318,8 +319,7 @@ def _handle_message(content: str, sender_id: str, config_path: str, state_path: 
         return
 
 
-def main():
-    ensure_path()
+def run():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
@@ -380,6 +380,26 @@ def main():
     # Notify shutdown
     _reply_bot(my_user_id, "🔴 LarkListener 已停止")
     logger.info("LarkListener stopped.")
+
+
+def main():
+    ensure_path()
+    parser = argparse.ArgumentParser(prog="lark-listener")
+    sub = parser.add_subparsers(dest="command")
+    for name in ("run", "setup", "start", "stop", "restart", "status", "config", "uninstall"):
+        sub.add_parser(name)
+    args = parser.parse_args()
+
+    if args.command == "run":
+        run()
+    elif args.command == "setup":
+        from lark_listener.setup_wizard import cmd_setup
+        cmd_setup()
+    elif args.command in ("start", "stop", "restart", "status", "config", "uninstall"):
+        from lark_listener import service
+        getattr(service, f"cmd_{args.command}")()
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
