@@ -6,3 +6,5 @@ dist/
 *.spec
 .claude/
 docs/
+.venv/
+venv/

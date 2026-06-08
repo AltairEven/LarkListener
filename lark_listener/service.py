@@ -7,9 +7,14 @@ import time
 from pathlib import Path
 from typing import Optional
 
-LISTENER_HOME = Path.home() / ".lark_listener"
-PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.larklistener.plist"
-LABEL = "com.larklistener"
+# 数据目录与服务标识支持环境变量覆盖，便于开发时与生产隔离（不设则用默认，
+# 行为与原先完全一致）：
+#   LARK_LISTENER_HOME  —— 数据目录（config/state/logs/venv），默认 ~/.lark_listener
+#   LARK_LISTENER_LABEL —— launchd Label，默认 com.larklistener（plist 文件名随之）
+_HOME_ENV = os.environ.get("LARK_LISTENER_HOME")
+LISTENER_HOME = Path(_HOME_ENV).expanduser() if _HOME_ENV else Path.home() / ".lark_listener"
+LABEL = os.environ.get("LARK_LISTENER_LABEL", "com.larklistener")
+PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 # 隔离虚拟环境（标准库 venv，install.sh 创建）与其内的可执行入口。
 VENV_DIR = LISTENER_HOME / "venv"
@@ -37,7 +42,12 @@ def ensure_shim_link() -> None:
 
     install.sh 已建一次；setup 再调用一次，兼容本地 `pip install` 直装、未走
     install.sh 的情况。仅当 venv 入口存在时才建。
+
+    开发隔离态（设了 LARK_LISTENER_HOME）直接跳过：短命令软链是给生产用户的便利，
+    dev 用 venv 内绝对路径调用即可，绝不覆盖生产的 ~/.local/bin/lark-listener。
     """
+    if os.environ.get("LARK_LISTENER_HOME"):
+        return
     target = Path(shim_path())
     if not target.is_file():
         return
@@ -65,6 +75,17 @@ def build_plist(program_path: str, extra_path_dirs: list[str]) -> str:
             dirs.append(d)
     path_value = ":".join(dirs)
     logs = LISTENER_HOME / "logs"
+
+    # launchd 起的进程不继承当前 shell 的环境变量，必须把它们写进 plist。生产态
+    # 只需 PATH；开发隔离态（设了 LARK_LISTENER_HOME）还要透传 HOME/LABEL，否则
+    # launchd 跑的 run 服务会回退到生产 ~/.lark_listener 而读不到 dev 配置。
+    env_items = {"PATH": path_value}
+    if os.environ.get("LARK_LISTENER_HOME"):
+        env_items["LARK_LISTENER_HOME"] = str(LISTENER_HOME)
+        env_items["LARK_LISTENER_LABEL"] = LABEL
+    env_xml = "\n".join(
+        f"        <key>{k}</key>\n        <string>{v}</string>" for k, v in env_items.items()
+    )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -90,8 +111,7 @@ def build_plist(program_path: str, extra_path_dirs: list[str]) -> str:
     <string>{logs}/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PATH</key>
-        <string>{path_value}</string>
+{env_xml}
     </dict>
 </dict>
 </plist>
@@ -111,8 +131,9 @@ def stop_service() -> None:
     if PLIST_PATH.exists():
         subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
         time.sleep(1)
-    # venv 入口 / python 进程的 cmdline 都含 "lark-listener run"
-    subprocess.run(["pkill", "-f", "lark-listener run"], capture_output=True)
+    # 按本实例 venv 路径精确匹配，避免 dev 测试与生产互相误杀（进程 cmdline 含
+    # venv 内入口绝对路径）。
+    subprocess.run(["pkill", "-f", f"{VENV_DIR}/bin/lark-listener run"], capture_output=True)
     subprocess.run(["pkill", "-f", "lark-cli event.*--as bot"], capture_output=True)
 
 

@@ -147,6 +147,12 @@ def _bot_listener():
 
             proc.terminate()
             proc.wait(timeout=5)
+            # event 子进程退出（连接正常结束、网络断开、或被拒如授权失效）。若服务
+            # 仍在运行，等待后再重连——否则当 `lark-cli event` 立即失败时（profile
+            # 失效/授权过期），for 循环瞬间结束，while 会无间隔 busy-loop 狂开子进程。
+            if _running:
+                logger.info("Bot listener exited, reconnecting in 5s...")
+                time.sleep(5)
         except Exception:
             logger.exception("Bot listener error, restarting in 10s...")
             time.sleep(10)
@@ -323,7 +329,8 @@ def run():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    home = Path.home() / ".lark_listener"
+    from lark_listener import service
+    home = service.LISTENER_HOME  # 支持 LARK_LISTENER_HOME 覆盖（开发隔离）
     config_path = str(home / "config.yaml")
     state_path = str(home / "state.json")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import yaml
 from pathlib import Path
 from typing import Any, Optional
@@ -53,7 +54,9 @@ def _validate(config: dict) -> None:
 def load_config(path: Optional[str] = None) -> dict[str, Any]:
     """Load config from YAML file, applying defaults for missing fields."""
     if path is None:
-        path = str(Path.home() / ".lark_listener" / "config.yaml")
+        _home = os.environ.get("LARK_LISTENER_HOME")
+        base = Path(_home).expanduser() if _home else Path.home() / ".lark_listener"
+        path = str(base / "config.yaml")
 
     config_path = Path(path)
     if not config_path.exists():
