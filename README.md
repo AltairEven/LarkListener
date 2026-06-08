@@ -13,7 +13,7 @@
 > | **日志** | `~/.lark_listener/logs/stderr.log` |
 > | **launchd** | `~/Library/LaunchAgents/com.larklistener.plist` |
 
-> 你是来帮用户安装/操作这个工具的 AI 助手？直接看文末 [**给 AI 助手（For AI assistants）**](#给-ai-助手for-ai-assistants)。
+> 🤖 你是帮用户安装/操作本工具的 AI 助手（Claude Code 等）？安装/操作契约见仓库根目录 [**AGENTS.md**](AGENTS.md)——先读它。
 
 ---
 
@@ -115,85 +115,10 @@ tail -f ~/.lark_listener/logs/stderr.log
 
 ---
 
-## 给 AI 助手（For AI assistants）
+## 给 AI 助手 / For AI assistants
 
-If you're an AI agent (Claude Code, etc.) helping a user install or operate LarkListener, read this section first. It states what's safe to run yourself, what needs the human, and the exact contract of each surface.
+帮用户安装或操作本工具的 AI agent（Claude Code 等），请读仓库根目录的 **[AGENTS.md](AGENTS.md)**——那是完整的安装/操作契约（谁该跑哪条命令、哪些命令不可盲跑、Bot 自然语言指令、诊断）。
 
-> **📋 Canonical agent contract: [AGENTS.md](AGENTS.md)** — read it before running anything.
->
-> **The one input you must get from the user: the bot appId (`cli_xxx`).** LarkListener runs *as* a specific Lark bot. Confirm which one with `lark-cli profile list`, then have the user pick — don't assume the active profile. Getting this wrong points the service at the wrong bot.
-
-### Two interaction surfaces — don't conflate them
-
-- **CLI** — `lark-listener <command>` in a terminal. Used to **install and manage the service**.
-- **Bot chat** — natural-language messages the user sends to the LarkListener Bot **inside Feishu/Lark**. Used for **daily use and config edits**. These are *not* shell commands; don't run them in Bash. (If you drive the user's Lark via `lark-cli` / a lark-im tool, you *could* send these as bot messages — but the recipient is the bot, in chat.)
-
-### ⚠️ Interactive commands — do NOT run unattended
-
-These block on stdin / open a GUI and will hang or stall a non-interactive shell. Hand them to the user (e.g. suggest they type `! lark-listener setup` so it runs in their session):
-
-- **`lark-listener setup`** — interactive wizard; **have the user run it** (`! lark-listener setup`). Make sure they know **which bot appId (`cli_xxx`)** to use first — run `lark-cli profile list` and let them pick. For a fresh config it prompts, in order:
-  1. **Bot appId（`cli_xxx`）← 最关键**：检测到 active bot 时问 `使用它？(Y/n)`，否则要求输入 appId。**不要默认就用 active 的，先和用户确认。**
-  2. `轮询间隔（秒，默认 300）`
-  3. `关注的关键词（逗号分隔，可空）`
-  4. AI 后端 `1) openai  2) claude  3) ollama`（默认 1）
-  5. `模型名称`（如 `gpt-4o` / `claude-sonnet-4-6` / `qwen2.5:7b`）
-  6. `API Key`（ollama 可空）
-  7. `API Base URL`（留空用默认）
-  8. `user_id`：自动获取，失败则要求手输 `ou_xxx`
-  9. `bot_chat_id`：自动获取（向用户发一条测试消息），失败则手输 `oc_xxx`
-  10. 授权：缺 `search:message` scope 时问 `现在发起授权登录？(Y/n)`（会开浏览器）
-- **`lark-listener uninstall`** — prompts `确认卸载？(y/N)` then deletes the service, plist, shim and `~/.lark_listener`.
-- **`lark-listener config`** — runs `open -t config.yaml` (opens a GUI editor). To read/edit programmatically, touch `~/.lark_listener/config.yaml` directly instead.
-
-### ✅ Safe / non-interactive commands
-
-- **`lark-listener status`** — the diagnostic entry point; prints service state + main/listener PIDs + every file location with ✓/—. **Start here when diagnosing.**
-- **`lark-listener start` / `stop` / `restart`** — non-interactive; manage the launchd service.
-
-### Deterministic setup flow
-
-```text
-1. Prereqs (user):  npm i -g @larksuite/cli && lark-cli config init
-                    lark-cli auth login --scope search:message
-2. Install:         curl -fsSL .../install.sh | bash        # creates venv, installs, links short command
-3. Configure:       lark-listener setup                     # INTERACTIVE → user runs it
-4. Start:           lark-listener start                     # bot DMs "✅ 已启动" on success
-5. Trigger:         user messages the Bot 「汇总」 in Feishu
-```
-
-### Command reference
-
-| Command | Interactive? | Effect |
-|---|---|---|
-| `lark-listener setup` | **Yes** (prompts) | Install wizard: pick bot, set interval/keywords/AI, write launchd plist, guide auth |
-| `lark-listener start` | No | Load the launchd service (idempotent: unloads then loads) |
-| `lark-listener stop` | No | Unload the service + reap listener subprocess |
-| `lark-listener restart` | No | `stop` then `start`（升级或改代码后必须） |
-| `lark-listener status` | No | Diagnostic panel: state + PIDs + file locations |
-| `lark-listener config` | **Yes** (GUI editor) | `open -t ~/.lark_listener/config.yaml` |
-| `lark-listener uninstall` | **Yes** (`y/N`) | Remove service, plist, shim, `~/.lark_listener` |
-| `lark-listener run` | No (internal) | The daemon loop — launchd calls this; don't run by hand |
-
-### Bot natural-language intents (sent in Feishu, not the shell)
-
-| Send to Bot | Intent |
-|---|---|
-| `汇总` / `总结` / `summary` | Summarise recent messages now |
-| `汇总最近2小时` / `汇总今天上午` | Summarise a custom time range |
-| `当前配置` | Show editable config (secrets hidden) |
-| `帮助` | Show what's editable and how |
-| `轮询间隔改成10分钟` | Set a scalar field (then reply `确认`) |
-| `关注关键词 上线` / `不要关注 故障` | Add / remove a list item (then reply `确认`) |
-| `确认` / `取消` | Confirm / cancel a pending config change |
-
-> Protected fields `ai` / `notify` / `lark_cli_appid` are **rejected** over chat by design — edit `~/.lark_listener/config.yaml` and the next poll picks it up (no restart needed for config; restart only for code upgrades).
-
-### Diagnostics
-
-- `lark-listener status` — service state, PIDs, file locations.
-- `tail -n 100 ~/.lark_listener/logs/stderr.log` — most failures leave a trace here.
-- Can't fetch messages → `lark-cli` auth expired → `lark-cli auth login --scope search:message`.
-- Bot silent → check `status`; if not running → `lark-listener start`.
+一句话要点：**安装时唯一必须问用户的输入是 bot appId（`cli_xxx`）**——先 `lark-cli profile list` 列出可选 Bot 让用户选，别默认用当前 active profile；`setup` 是交互式的，需用户本人运行（`! lark-listener setup`），不要盲跑。
 
 开发与测试说明见 [CLAUDE.md](CLAUDE.md)。
