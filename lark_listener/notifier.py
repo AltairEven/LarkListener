@@ -203,7 +203,14 @@ class Notifier:
             "--markdown", markdown,
             "--as", "bot",
         )
-        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # Best-effort: a failed send (lark-cli missing, timeout, network) must NOT
+        # propagate — it would abort poll_once before the caller advances
+        # last_poll_time, freezing the start time and re-pushing the same summary
+        # every cycle. Losing one toast is better than a duplicate-notification loop.
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            logger.warning("Bot summary message failed to send (%s).", e)
 
     def _send_macos_notification(
         self,

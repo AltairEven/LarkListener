@@ -1,5 +1,6 @@
 import json
-from unittest.mock import patch
+import sys
+from unittest.mock import patch, MagicMock
 import pytest
 from lark_listener.analyzer import (
     Analyzer,
@@ -362,7 +363,13 @@ def test_analyze_marks_self_messages(mock_call_ai):
     analyzer.analyze(messages, my_user_id="ou_me")
 
     prompt = mock_call_ai.call_args[0][0]
-    assert "[我]" in prompt
+    # Assert on the actual message lines, not the template (which itself contains
+    # the literal "[我]"). The self message must be prefixed, the other must not.
+    msg_lines = [ln for ln in prompt.splitlines() if ln.startswith("[msg_")]
+    me_line = next(ln for ln in msg_lines if ln.startswith("[msg_me]"))
+    other_line = next(ln for ln in msg_lines if ln.startswith("[msg_other]"))
+    assert "[我]" in me_line
+    assert "[我]" not in other_line
 
 
 @patch("lark_listener.analyzer.Analyzer._call_ai")
@@ -523,3 +530,98 @@ def test_analyze_without_context(mock_call_ai):
     # No message lines should have [上下文] prefix (template text is ok)
     msg_lines = [l for l in prompt.split("\n") if l.startswith("[")]
     assert not any("[上下文]" in l for l in msg_lines)
+
+
+# --- AI call timeout & robustness (review #2, #9) ---
+
+
+def _single_msg():
+    return {
+        MessageCategory.P2P: [{
+            "message_id": "msg_a", "chat_id": "oc_a",
+            "sender": {"id": "ou_x", "name": "X"}, "msg_type": "text",
+            "content": "hi", "create_time": "1716796800",
+        }],
+        MessageCategory.AT_ME: [], MessageCategory.KEYWORD: [],
+    }
+
+
+def test_call_claude_passes_timeout():
+    """Claude SDK call must set a bounded timeout, not rely on the 600s default."""
+    fake = MagicMock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text="[]")]
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+        analyzer._call_claude("prompt")
+    kwargs = fake.Anthropic.return_value.messages.create.call_args.kwargs
+    assert kwargs.get("timeout") == 180
+
+
+def test_call_openai_passes_timeout():
+    """OpenAI SDK call must set a bounded timeout, not rely on the 600s default."""
+    fake = MagicMock()
+    fake.OpenAI.return_value.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content="[]"))
+    ]
+    with patch.dict(sys.modules, {"openai": fake}):
+        analyzer = Analyzer(provider="openai", model="m", api_key="k", base_url="", keywords=[])
+        analyzer._call_openai("prompt")
+    kwargs = fake.OpenAI.return_value.chat.completions.create.call_args.kwargs
+    assert kwargs.get("timeout") == 180
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_returns_empty_when_ai_raises(mock_call_ai):
+    """AI failure (timeout/network) degrades to no per-conversation analysis, no crash."""
+    mock_call_ai.side_effect = TimeoutError("AI timed out")
+    analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+    assert analyzer.analyze(_single_msg(), my_user_id="ou_me") == {}
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_coerces_single_object_response(mock_call_ai):
+    """A bare single-conversation object (not wrapped in an array) must be kept,
+    not silently dropped."""
+    mock_call_ai.return_value = {
+        "conversation_id": "oc_a", "relevance": "high", "urgency": "normal",
+        "summary": "single", "relevant_message_id": "msg_a",
+    }
+    analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+    results = analyzer.analyze(_single_msg(), my_user_id="ou_me")
+    assert results["oc_a"].summary == "single"
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_unwraps_results_wrapper(mock_call_ai):
+    """A {"results": [...]} envelope must be unwrapped."""
+    mock_call_ai.return_value = {"results": [
+        {"conversation_id": "oc_a", "relevance": "low", "urgency": "low",
+         "summary": "wrapped", "relevant_message_id": "msg_a"},
+    ]}
+    analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+    results = analyzer.analyze(_single_msg(), my_user_id="ou_me")
+    assert results["oc_a"].summary == "wrapped"
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_handles_unusable_response(mock_call_ai):
+    """An unusable shape (scalar, or dict without results/conversation_id) → {} (no crash)."""
+    analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+    mock_call_ai.return_value = "just a string"
+    assert analyzer.analyze(_single_msg(), my_user_id="ou_me") == {}
+    mock_call_ai.return_value = {"unexpected": "shape"}
+    assert analyzer.analyze(_single_msg(), my_user_id="ou_me") == {}
+
+
+@patch("lark_listener.analyzer.Analyzer._call_ai")
+def test_analyze_skips_non_dict_items(mock_call_ai):
+    """A garbage (non-dict) item in the array must be skipped, valid ones kept."""
+    mock_call_ai.return_value = [
+        {"conversation_id": "oc_a", "relevance": "high", "urgency": "normal",
+         "summary": "ok", "relevant_message_id": "msg_a"},
+        "garbage",
+    ]
+    analyzer = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+    results = analyzer.analyze(_single_msg(), my_user_id="ou_me")
+    assert "oc_a" in results
+    assert results["oc_a"].summary == "ok"

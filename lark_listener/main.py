@@ -30,8 +30,12 @@ logger = logging.getLogger("lark_listener")
 
 _running = True
 _listener_proc: Optional[subprocess.Popen] = None
-_trigger_queue: queue.Queue[Optional[tuple[str, str]]] = queue.Queue()
+# 触发项：(content, sender_id, message_id)；None 为关停哨兵。
+_trigger_queue: queue.Queue[Optional[tuple[str, str, str]]] = queue.Queue()
 _pending_change: Optional[dict] = None
+
+# 连续轮询出错达到此阈值即告警（见 _note_poll_error）。
+MAX_ERRORS = 3
 
 
 def _reply_bot(user_id: str, text: str, markdown: bool = False):
@@ -98,6 +102,7 @@ def _bot_listener():
     global _listener_proc
     _kill_stale_event_subscribers()
     while _running:
+        proc = None
         try:
             proc = subprocess.Popen(
                 lark_cli(
@@ -128,8 +133,6 @@ def _bot_listener():
                     # Raw event format: event.message.content = '{"text":"..."}'
                     message = event.get("event", {}).get("message", {})
                     message_id = message.get("message_id", "")
-                    if message_id:
-                        _add_reaction(message_id)
                     sender = event.get("event", {}).get("sender", {})
                     sender_id = sender.get("sender_id", {}).get("open_id", "")
                     msg_content = message.get("content", "")
@@ -141,21 +144,28 @@ def _bot_listener():
                     if not content:
                         continue
                     logger.info("Bot received message: %s", content[:100])
-                    _trigger_queue.put((content, sender_id))
+                    # reaction 延后到 _handle_message：仅对将真正处理的消息回执，
+                    # 避免给陌生人/无意义消息加表情误导「命令已接受」。
+                    _trigger_queue.put((content, sender_id, message_id))
                 except json.JSONDecodeError:
                     continue
-
-            proc.terminate()
-            proc.wait(timeout=5)
-            # event 子进程退出（连接正常结束、网络断开、或被拒如授权失效）。若服务
-            # 仍在运行，等待后再重连——否则当 `lark-cli event` 立即失败时（profile
-            # 失效/授权过期），for 循环瞬间结束，while 会无间隔 busy-loop 狂开子进程。
-            if _running:
-                logger.info("Bot listener exited, reconnecting in 5s...")
-                time.sleep(5)
         except Exception:
-            logger.exception("Bot listener error, restarting in 10s...")
-            time.sleep(10)
+            logger.exception("Bot listener error")
+        finally:
+            # 无论正常退出还是异常路径，都回收 event 子进程（node 壳 + Go 二进制）。
+            # 否则异常时 proc.terminate 被跳过，每次重连泄漏一个孤儿订阅进程。
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+        # event 子进程退出（连接正常结束、网络断开、或被拒如授权失效）。若服务仍在
+        # 运行，等待后再重连——否则 `lark-cli event` 立即失败时（profile 失效/授权
+        # 过期）for 循环瞬间结束，while 会无间隔 busy-loop 狂开子进程。
+        if _running:
+            logger.info("Bot listener exited, reconnecting in 5s...")
+            time.sleep(5)
 
 
 def poll_once(
@@ -250,14 +260,22 @@ def poll_once(
     logger.info("Summary sent successfully")
 
 
-def _handle_message(content: str, sender_id: str, config_path: str, state_path: str):
-    """Dispatch a bot message: summary trigger, or owner-only config operation."""
+def _handle_message(content: str, sender_id: str, config_path: str, state_path: str,
+                    message_id: str = ""):
+    """Dispatch a bot message: summary trigger, or owner-only config operation.
+
+    A "Get" reaction is added only once the message is determined actionable
+    (summary, or a config op from the owner) — not on receipt — so strangers and
+    non-actionable messages don't get a misleading acknowledgement.
+    """
     global _pending_change
     config = load_config(config_path)
     my_user_id = config["notify"]["user_id"]
     parsed = intent.parse(content, config)
 
     if parsed.type == "summary":
+        if message_id:
+            _add_reaction(message_id)
         if parsed.start_time:
             logger.info("Trigger with custom start: %s", parsed.start_time.isoformat())
         else:
@@ -280,9 +298,12 @@ def _handle_message(content: str, sender_id: str, config_path: str, state_path: 
         if sender_id:
             _reply_bot(sender_id, "⚠️ 仅本人可查看或修改配置")
         else:
-            # No sender id to route a reply to — drop silently (already ack'd via reaction).
             logger.info("Config op from unknown sender ignored")
         return
+
+    # Owner-authorised config op → acknowledge with a reaction before processing.
+    if message_id:
+        _add_reaction(message_id)
 
     if parsed.type == "config_view":
         _reply_bot(my_user_id, config_editor.render_config(config), markdown=True)
@@ -325,6 +346,31 @@ def _handle_message(content: str, sender_id: str, config_path: str, state_path: 
         return
 
 
+def _note_poll_error(error_count: int, my_user_id: str) -> int:
+    """Increment the consecutive-error count; alert and reset at the threshold.
+
+    Resetting after the alert (rather than alerting once forever) avoids both
+    every-cycle spam and the original `== MAX_ERRORS` bug where a persistent
+    failure alerted only once and then ran silently. Returns the new count.
+    """
+    error_count += 1
+    if error_count >= MAX_ERRORS:
+        _reply_bot(my_user_id, f"⚠️ LarkListener 已连续出错 {MAX_ERRORS} 次，请检查日志：\ntail -f ~/.lark_listener/logs/stderr.log")
+        return 0
+    return error_count
+
+
+def _dispatch_trigger(item: tuple[str, str, str], config_path: str, state_path: str, my_user_id: str):
+    """Handle one trigger item. A failure (AI, network, lark-cli, bad config) must
+    NOT crash the service — otherwise launchd KeepAlive restarts into a crash loop."""
+    content, sender_id, message_id = item
+    try:
+        _handle_message(content, sender_id, config_path, state_path, message_id)
+    except Exception:
+        logger.exception("Error handling message: %s", content[:50])
+        _reply_bot(my_user_id, "⚠️ 处理请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
+
+
 def run():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -352,7 +398,6 @@ def run():
     listener_thread.start()
 
     error_count = 0
-    MAX_ERRORS = 3
 
     while _running:
         try:
@@ -363,9 +408,7 @@ def run():
             error_count = 0  # Reset on success
         except Exception:
             logger.exception("Error during poll cycle")
-            error_count += 1
-            if error_count == MAX_ERRORS:
-                _reply_bot(my_user_id, f"⚠️ LarkListener 已连续出错 {MAX_ERRORS} 次，请检查日志：\ntail -f ~/.lark_listener/logs/stderr.log")
+            error_count = _note_poll_error(error_count, my_user_id)
 
         # Wait for interval or trigger
         try:
@@ -374,15 +417,7 @@ def run():
             continue
         if item is None:
             break
-        content, sender_id = item
-
-        # A failure here (AI, network, lark-cli, bad config) must NOT crash the
-        # service — otherwise launchd KeepAlive restarts it into a crash loop.
-        try:
-            _handle_message(content, sender_id, config_path, state_path)
-        except Exception:
-            logger.exception("Error handling message: %s", content[:50])
-            _reply_bot(my_user_id, "⚠️ 处理请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
+        _dispatch_trigger(item, config_path, state_path, my_user_id)
 
     # Notify shutdown
     _reply_bot(my_user_id, "🔴 LarkListener 已停止")

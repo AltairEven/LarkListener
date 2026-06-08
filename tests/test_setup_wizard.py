@@ -22,6 +22,24 @@ def test_pip_install_ai_installs_into_venv_python(mock_run):
 
 
 @patch("lark_listener.setup_wizard.subprocess.run")
+def test_pip_install_ai_prefers_venv_python_when_present(mock_run, tmp_path, monkeypatch):
+    """When the venv python exists, install into it (not the interpreter running
+    setup) — covers `pip install` direct installs where sys.executable is the
+    system/CLT python, which would put the SDK outside the venv the daemon runs in."""
+    venv_py = tmp_path / "venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("")
+    monkeypatch.setattr(setup_wizard.service, "VENV_DIR", tmp_path / "venv")
+    mock_run.return_value = MagicMock(returncode=0)
+
+    setup_wizard._pip_install_ai("claude")
+
+    argv = mock_run.call_args[0][0]
+    assert argv[0] == str(venv_py)
+    assert argv[1:4] == ["-m", "pip", "install"]
+
+
+@patch("lark_listener.setup_wizard.subprocess.run")
 def test_pip_install_ai_noop_for_ollama(mock_run):
     setup_wizard._pip_install_ai("ollama")
     mock_run.assert_not_called()

@@ -373,16 +373,13 @@ def test_fetch_handles_invalid_json(mock_run):
     mock_run.return_value = mock
 
     fetcher = Fetcher(keywords=[])
-    try:
-        result = fetcher.fetch(
-            datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
-            datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
-            processed_ids=set(),
-        )
-        # If it doesn't raise, should have empty results
-        assert all(len(msgs) == 0 for msgs in result.values())
-    except json.JSONDecodeError:
-        pass  # Also acceptable
+    # Must NOT raise — invalid JSON is treated as empty results (best-effort).
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert all(len(msgs) == 0 for msgs in result.values())
 
 
 # --- Multiple keywords tests ---

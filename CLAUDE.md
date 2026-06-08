@@ -15,6 +15,7 @@
 | `setup_wizard.py` | 交互安装向导 `cmd_setup`；纯函数 `build_config_dict`/`write_config_file`/`ai_packages_for`/`_pip_install_ai` |
 | `analyzer.py` / `intent.py` | 调 AI（**延迟 import** anthropic/openai；ollama 走标准库 urllib） |
 | `fetcher.py` | 调 `lark-cli` 搜消息、取上下文 |
+| `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`（被 main/fetcher/notifier/setup 依赖） |
 | `notifier.py` | Bot 消息 + macOS 通知（osascript 默认，terminal-notifier 可选） |
 | `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify` 受保护不可经 bot 改） |
 | `state.py` | 去重与上次轮询时间 |
@@ -81,7 +82,7 @@ python3 -m pytest -q       # 全绿才算改完
 
 `lark-listener status` 是诊断入口，输出：服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。
 
-- 进程构成：1 个主进程 `… lark-listener run`（launchd KeepAlive 守护）+ `lark-cli event` 监听子进程（node 壳 + Go 二进制，由监听线程拉起，断开会按间隔重连）。
+- 进程构成：1 个主进程 `… lark-listener run`（launchd KeepAlive 守护）+ `lark-cli event +subscribe … --as bot` 监听子进程（node 壳 + Go 二进制，由监听线程拉起，断开会按间隔重连）。
 - 文件布局：
   - `~/.lark_listener/`：`config.yaml`、`state.json`、`logs/`、`venv/`、`shim_link`（记录软链实际位置）
   - `~/Library/LaunchAgents/com.larklistener.plist`：launchd 配置

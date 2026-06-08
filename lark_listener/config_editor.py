@@ -92,7 +92,12 @@ def _apply_list_op(current, op, value):
     items = [str(x) for x in current]
     if op == "set":
         new = value if isinstance(value, list) else [value]
-        return [str(x) for x in new], None
+        deduped: list[str] = []
+        for x in new:
+            s = str(x)
+            if s not in deduped:  # 去重保序：避免重复关键词触发重复 lark-cli 搜索
+                deduped.append(s)
+        return deduped, None
     if op == "add":
         v = str(value)
         if v not in items:

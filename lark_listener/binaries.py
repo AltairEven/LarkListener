@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -62,18 +61,29 @@ def lark_cli(*args: str) -> list[str]:
     return cmd
 
 
-@lru_cache(maxsize=None)
+# 只缓存「成功解析」的绝对路径，进程内复用。失败不缓存：服务启动早于安装/升级完成
+# 时第一次会解析失败，若把裸名永久缓存，软链就位后仍读旧值需重启才生效。
+_resolve_cache: dict[str, str] = {}
+
+
 def resolve_executable(name: str) -> str:
     """Resolve ``name`` to an absolute path, independent of inherited PATH.
 
     Tries PATH first, then well-known install locations. Falls back to the bare
     name so the original FileNotFoundError still surfaces if it is truly missing.
+    A successful resolution is cached; a failed one is not (see _resolve_cache).
     """
+    cached = _resolve_cache.get(name)
+    if cached is not None:
+        return cached
     found = shutil.which(name)
+    if not found:
+        for directory in _COMMON_BIN_DIRS:
+            candidate = Path(directory) / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                found = str(candidate)
+                break
     if found:
+        _resolve_cache[name] = found
         return found
-    for directory in _COMMON_BIN_DIRS:
-        candidate = Path(directory) / name
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
     return name

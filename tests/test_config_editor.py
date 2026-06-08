@@ -95,6 +95,14 @@ def test_list_add_dedupes():
     assert diff == ""  # already present → no-op, no diff
 
 
+def test_list_set_dedupes_preserving_order():
+    """`set` must drop duplicates (like add does) so keyword search doesn't run
+    the same keyword twice."""
+    new_value, err = config_editor._apply_list_op(["部署"], "set", ["上线", "上线", "故障", "上线"])
+    assert err is None
+    assert new_value == ["上线", "故障"]
+
+
 def test_list_add_new_keyword_shows_diff():
     diff, err = config_editor.compute_diff(
         [{"field": "keywords", "op": "add", "value": "上线"}], EFFECTIVE)

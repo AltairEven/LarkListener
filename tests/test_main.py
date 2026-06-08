@@ -314,6 +314,136 @@ def test_dispatch_error_replies_not_understood(mock_parse, mock_reply, tmp_path)
     assert "帮助" in mock_reply.call_args.args[1]
 
 
+# --- _reply_bot best-effort (review blind spot, CLAUDE.md #6) ---
+
+
+@patch("lark_listener.main.subprocess.run")
+def test_reply_bot_swallows_errors(mock_run):
+    mock_run.side_effect = Exception("boom")
+    main_mod._reply_bot("ou_x", "hello")  # 必须不抛
+
+
+# --- reaction only on actionable messages (review #6) ---
+
+
+@patch("lark_listener.main._add_reaction")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.poll_once")
+def test_handle_message_reacts_on_summary(mock_poll, mock_parse, mock_reply, mock_react, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="summary", start_time=None)
+    main_mod._handle_message("总结", "ou_anyone", config_path, state_path, "om_1")
+    mock_react.assert_called_once_with("om_1")
+
+
+@patch("lark_listener.main._add_reaction")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.config_editor.render_config", return_value="CFG")
+def test_handle_message_reacts_on_owner_config_op(mock_render, mock_parse, mock_reply, mock_react, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="config_view")
+    main_mod._handle_message("当前配置", "ou_test", config_path, state_path, "om_2")
+    mock_react.assert_called_once_with("om_2")
+
+
+@patch("lark_listener.main._add_reaction")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_handle_message_no_reaction_for_non_owner(mock_parse, mock_reply, mock_react, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="config_view")
+    main_mod._handle_message("当前配置", "ou_stranger", config_path, state_path, "om_3")
+    mock_react.assert_not_called()
+
+
+@patch("lark_listener.main._add_reaction")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+def test_handle_message_no_reaction_for_none(mock_parse, mock_reply, mock_react, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_parse.return_value = Intent(type="none")
+    main_mod._handle_message("你好", "ou_test", config_path, state_path, "om_4")
+    mock_react.assert_not_called()
+
+
+# --- _bot_listener subprocess lifecycle (review #3, blind spot) ---
+
+
+@patch("lark_listener.main._kill_stale_event_subscribers")
+@patch("lark_listener.main.time.sleep")
+@patch("lark_listener.main.subprocess.Popen")
+def test_bot_listener_terminates_proc_when_stdout_raises(mock_popen, mock_sleep, mock_kill):
+    """If stdout iteration raises, the event subprocess must still be terminated
+    (else each reconnect leaks an orphan node/Go subscriber)."""
+    proc = MagicMock()
+    proc.stdout.__iter__.side_effect = RuntimeError("boom")
+    mock_popen.return_value = proc
+    mock_sleep.side_effect = lambda *a: setattr(main_mod, "_running", False)
+
+    main_mod._running = True
+    try:
+        main_mod._bot_listener()
+    finally:
+        main_mod._running = True
+    proc.terminate.assert_called_once()
+
+
+@patch("lark_listener.main._kill_stale_event_subscribers")
+@patch("lark_listener.main.time.sleep")
+@patch("lark_listener.main.subprocess.Popen")
+def test_bot_listener_enqueues_message_with_id(mock_popen, mock_sleep, mock_kill):
+    # drain queue first
+    while not main_mod._trigger_queue.empty():
+        main_mod._trigger_queue.get_nowait()
+
+    line = _json2.dumps({
+        "event": {
+            "message": {"message_id": "om_1", "content": _json2.dumps({"text": "总结"})},
+            "sender": {"sender_id": {"open_id": "ou_x"}},
+        }
+    }) + "\n"
+    proc = MagicMock()
+    proc.stdout = iter([line])
+    mock_popen.return_value = proc
+    mock_sleep.side_effect = lambda *a: setattr(main_mod, "_running", False)
+
+    main_mod._running = True
+    try:
+        main_mod._bot_listener()
+    finally:
+        main_mod._running = True
+
+    item = main_mod._trigger_queue.get_nowait()
+    assert item == ("总结", "ou_x", "om_1")
+
+
+# --- run() helpers extracted for testability (review blind spot) ---
+
+
+@patch("lark_listener.main._reply_bot")
+def test_note_poll_error_alerts_at_threshold_then_resets(mock_reply):
+    # 前两次不告警，第三次（达到 MAX_ERRORS=3）告警并归零，便于持续故障周期性再提醒。
+    c = main_mod._note_poll_error(0, "ou_x")
+    assert c == 1 and mock_reply.call_count == 0
+    c = main_mod._note_poll_error(c, "ou_x")
+    assert c == 2 and mock_reply.call_count == 0
+    c = main_mod._note_poll_error(c, "ou_x")
+    assert c == 0 and mock_reply.call_count == 1
+    assert "连续出错" in mock_reply.call_args.args[1]
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main._handle_message")
+def test_dispatch_trigger_swallows_handler_error(mock_handle, mock_reply, tmp_path):
+    config_path, state_path = _write_cfg(tmp_path)
+    mock_handle.side_effect = Exception("kaboom")
+    # 必须不抛，并向用户回报出错
+    main_mod._dispatch_trigger(("总结", "ou_x", "om_1"), config_path, state_path, "ou_owner")
+    assert "出错" in mock_reply.call_args.args[1]
+
+
 import sys as _sys
 
 

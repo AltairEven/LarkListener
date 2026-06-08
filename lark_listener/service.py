@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Optional
+from xml.sax.saxutils import escape as _xml_escape
 
 # 数据目录与服务标识支持环境变量覆盖，便于开发时与生产隔离（不设则用默认，
 # 行为与原先完全一致）：
@@ -101,22 +102,25 @@ def build_plist(program_path: str, extra_path_dirs: list[str]) -> str:
     if os.environ.get("LARK_LISTENER_HOME"):
         env_items["LARK_LISTENER_HOME"] = str(LISTENER_HOME)
         env_items["LARK_LISTENER_LABEL"] = LABEL
+    # 所有插值都经 XML 转义：路径/Label 可能含 & < >（生产路径固定，但 dev 隔离用
+    # 任意 LARK_LISTENER_HOME，含特殊字符会生成非法 plist 使 launchctl load 静默失败）。
     env_xml = "\n".join(
-        f"        <key>{k}</key>\n        <string>{v}</string>" for k, v in env_items.items()
+        f"        <key>{_xml_escape(k)}</key>\n        <string>{_xml_escape(v)}</string>"
+        for k, v in env_items.items()
     )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{LABEL}</string>
+    <string>{_xml_escape(LABEL)}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{program_path}</string>
+        <string>{_xml_escape(program_path)}</string>
         <string>run</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>{LISTENER_HOME}</string>
+    <string>{_xml_escape(str(LISTENER_HOME))}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -124,9 +128,9 @@ def build_plist(program_path: str, extra_path_dirs: list[str]) -> str:
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>{logs}/stdout.log</string>
+    <string>{_xml_escape(str(logs))}/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>{logs}/stderr.log</string>
+    <string>{_xml_escape(str(logs))}/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
 {env_xml}
@@ -139,7 +143,13 @@ def build_plist(program_path: str, extra_path_dirs: list[str]) -> str:
 def _is_running() -> bool:
     try:
         out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=5)
-        return LABEL in out.stdout
+        # 按行尾的精确 Label 匹配，避免子串误判：`com.larklistener` 是
+        # `com.larklistener.dev` 的子串，否则 dev job 加载时生产会误报「运行中」。
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[-1] == LABEL:
+                return True
+        return False
     except Exception:
         return False
 
@@ -161,7 +171,10 @@ def cmd_start() -> None:
         return
     if _is_running():
         print("正在重启...")
-        stop_service()
+    # 无条件先 stop（unload 幂等 + 清理残留进程），再 load：覆盖「已 load 但未运行」
+    # 的限流/异常态——否则直接 load 会得到 already-loaded 错误（被 capture 吞掉），
+    # 随后误报启动失败。
+    stop_service()
     subprocess.run(["launchctl", "load", str(PLIST_PATH)], capture_output=True)
     time.sleep(3)
     if _is_running():
