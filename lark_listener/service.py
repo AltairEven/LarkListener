@@ -51,10 +51,17 @@ def ensure_shim_link() -> None:
     target = Path(shim_path())
     if not target.is_file():
         return
-    SHIM_LINK.parent.mkdir(parents=True, exist_ok=True)
-    if SHIM_LINK.is_symlink() or SHIM_LINK.exists():
-        SHIM_LINK.unlink()
-    SHIM_LINK.symlink_to(target)
+    # best-effort：~/.local/bin 不可写（如属主为 root）时不要崩掉 setup，
+    # 服务用 venv 绝对路径仍可运行，只是短命令不可用。
+    try:
+        SHIM_LINK.parent.mkdir(parents=True, exist_ok=True)
+        if SHIM_LINK.is_symlink() or SHIM_LINK.exists():
+            SHIM_LINK.unlink()
+        SHIM_LINK.symlink_to(target)
+    except OSError as e:
+        print(f"  ⚠️ 未能创建短命令软链 {SHIM_LINK}（{e}）。")
+        print(f"     可用绝对路径：{target}")
+        print(f"     或修复后重建：sudo chown $(whoami) {SHIM_LINK.parent} && ln -sf {target} {SHIM_LINK}")
 
 
 def node_bin_dir() -> Optional[str]:
