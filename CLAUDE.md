@@ -69,7 +69,11 @@ python3 -m pytest -q       # 全绿才算改完
 
 ## 分发 / 升级 / 卸载
 
-- 安装：`curl … install.sh | bash` → `venv` + `pip install git+…` + 软链 `~/.local/bin/lark-listener`。
+- 安装：`curl … install.sh | bash` → `venv` + `pip install git+…` + 软链短命令。软链目录按
+  ensurepath 策略选：优先「可写+已在 PATH」的目录（`~/.local/bin`→`/opt/homebrew/bin`→
+  `/usr/local/bin`，brew 用户免改配置）；否则用 `~/.local/bin` 并幂等注入 shell rc 的 PATH。
+  实际软链位置记录在 `~/.lark_listener/shim_link`，`uninstall` 据此精确清理。软链全程 best-effort，
+  失败也不影响安装（服务/命令用 venv 绝对路径仍可运行）。
 - 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。
 - 卸载：`lark-listener uninstall`（停服务、删 plist/软链/`~/.lark_listener`）。
 

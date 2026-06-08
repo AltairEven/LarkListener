@@ -18,8 +18,10 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 # 隔离虚拟环境（标准库 venv，install.sh 创建）与其内的可执行入口。
 VENV_DIR = LISTENER_HOME / "venv"
-# 短命令软链：~/.local/bin/lark-listener → venv 入口。
+# 短命令软链默认位置：~/.local/bin/lark-listener → venv 入口。install.sh 可能改建在
+# 其它「可写+在 PATH」的目录，实际位置记录在 SHIM_RECORD，供 uninstall 精确清理。
 SHIM_LINK = Path.home() / ".local" / "bin" / "lark-listener"
+SHIM_RECORD = LISTENER_HOME / "shim_link"
 
 # 旧版 PyInstaller 二进制残留路径，迁移时清理。
 _OLD_BINARY = LISTENER_HOME / "lark-listener"
@@ -51,13 +53,22 @@ def ensure_shim_link() -> None:
     target = Path(shim_path())
     if not target.is_file():
         return
-    # best-effort：~/.local/bin 不可写（如属主为 root）时不要崩掉 setup，
-    # 服务用 venv 绝对路径仍可运行，只是短命令不可用。
+    # install.sh 已建好软链（记录在 SHIM_RECORD）且仍有效 → 不重复建，避免与其选定的
+    # 目录冲突（如 install.sh 建在 /opt/homebrew/bin，这里别再往 ~/.local/bin 建一个）。
+    try:
+        rec = SHIM_RECORD.read_text().strip()
+        if rec and Path(rec).is_symlink() and os.path.realpath(rec) == os.path.realpath(target):
+            return
+    except OSError:
+        pass
+    # 否则在默认 ~/.local/bin best-effort 建（兼容本地 pip 直装、未走 install.sh）。
+    # 不可写（如属主 root）时不要崩掉 setup——服务用 venv 绝对路径仍可运行。
     try:
         SHIM_LINK.parent.mkdir(parents=True, exist_ok=True)
         if SHIM_LINK.is_symlink() or SHIM_LINK.exists():
             SHIM_LINK.unlink()
         SHIM_LINK.symlink_to(target)
+        SHIM_RECORD.write_text(str(SHIM_LINK) + "\n")
     except OSError as e:
         print(f"  ⚠️ 未能创建短命令软链 {SHIM_LINK}（{e}）。")
         print(f"     可用绝对路径：{target}")
@@ -196,7 +207,20 @@ def cmd_uninstall() -> None:
         return
     stop_service()
     PLIST_PATH.unlink(missing_ok=True)
-    if SHIM_LINK.is_symlink() or SHIM_LINK.exists():
-        SHIM_LINK.unlink()
-    shutil.rmtree(LISTENER_HOME, ignore_errors=True)  # 含 venv，一步删干净
+    # 删软链：记录的实际位置（install.sh 可能建在 /opt/homebrew/bin 等）+ 默认位置。
+    # 必须在 rmtree 之前读取 SHIM_RECORD（它在 LISTENER_HOME 内）。
+    links = {SHIM_LINK}
+    try:
+        rec = SHIM_RECORD.read_text().strip()
+        if rec:
+            links.add(Path(rec))
+    except OSError:
+        pass
+    for link in links:
+        try:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+        except OSError:
+            pass
+    shutil.rmtree(LISTENER_HOME, ignore_errors=True)  # 含 venv 与 shim_link 记录，一步删干净
     print("✓ 已卸载完成。")

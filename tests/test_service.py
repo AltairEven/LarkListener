@@ -34,29 +34,56 @@ def test_shim_path_points_into_venv():
     assert p.endswith("/.lark_listener/venv/bin/lark-listener")
 
 
-def test_ensure_shim_link_creates_symlink(tmp_path, monkeypatch):
-    # 用临时目录模拟 venv 入口与 ~/.local/bin，验证软链建立且指向 venv 入口。
-    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)  # 确保非 dev 隔离态
+def _stub_venv(tmp_path):
+    """建一个临时 venv 入口文件并返回其路径。"""
     venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
     venv_exe.parent.mkdir(parents=True)
     venv_exe.write_text("#!/bin/sh\n")
+    return venv_exe
+
+
+def test_ensure_shim_link_creates_symlink_and_records(tmp_path, monkeypatch):
+    # 验证软链建立、指向 venv 入口，并把位置写入 SHIM_RECORD。
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)  # 确保非 dev 隔离态
+    venv_exe = _stub_venv(tmp_path)
     link = tmp_path / ".local" / "bin" / "lark-listener"
+    record = tmp_path / "shim_link"
     monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
     monkeypatch.setattr(service, "SHIM_LINK", link)
+    monkeypatch.setattr(service, "SHIM_RECORD", record)
 
     service.ensure_shim_link()
 
     assert link.is_symlink()
     assert os.path.realpath(link) == os.path.realpath(venv_exe)
+    assert record.read_text().strip() == str(link)
+
+
+def test_ensure_shim_link_skips_when_record_valid(tmp_path, monkeypatch):
+    # install.sh 已建软链（记录有效）→ 不在默认位置重复建，避免目录冲突。
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+    venv_exe = _stub_venv(tmp_path)
+    existing = tmp_path / "elsewhere" / "lark-listener"
+    existing.parent.mkdir(parents=True)
+    existing.symlink_to(venv_exe)
+    record = tmp_path / "shim_link"; record.write_text(str(existing) + "\n")
+    default_link = tmp_path / ".local" / "bin" / "lark-listener"
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "SHIM_LINK", default_link)
+    monkeypatch.setattr(service, "SHIM_RECORD", record)
+
+    service.ensure_shim_link()
+
+    assert not default_link.exists()  # 跳过，未在默认位置另建
 
 
 def test_ensure_shim_link_survives_permission_error(tmp_path, monkeypatch):
     # ~/.local/bin 不可写（如属主 root）时不得崩掉 setup，只警告。
     monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
-    venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
-    venv_exe.parent.mkdir(parents=True); venv_exe.write_text("#!/bin/sh\n")
+    _stub_venv(tmp_path)
     monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
     monkeypatch.setattr(service, "SHIM_LINK", tmp_path / ".local" / "bin" / "lark-listener")
+    monkeypatch.setattr(service, "SHIM_RECORD", tmp_path / "shim_link")
     import pathlib
     monkeypatch.setattr(pathlib.Path, "symlink_to",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("Permission denied")))
@@ -67,12 +94,11 @@ def test_ensure_shim_link_skips_in_dev_mode(tmp_path, monkeypatch):
     # 开发隔离态（设了 LARK_LISTENER_HOME）即使 venv 入口存在也不建软链，
     # 绝不覆盖生产的 ~/.local/bin/lark-listener。
     monkeypatch.setenv("LARK_LISTENER_HOME", str(tmp_path / "dev-home"))
-    venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
-    venv_exe.parent.mkdir(parents=True)
-    venv_exe.write_text("#!/bin/sh\n")
+    _stub_venv(tmp_path)
     link = tmp_path / ".local" / "bin" / "lark-listener"
     monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
     monkeypatch.setattr(service, "SHIM_LINK", link)
+    monkeypatch.setattr(service, "SHIM_RECORD", tmp_path / "shim_link")
 
     service.ensure_shim_link()
 
@@ -81,9 +107,11 @@ def test_ensure_shim_link_skips_in_dev_mode(tmp_path, monkeypatch):
 
 def test_ensure_shim_link_noop_when_venv_missing(tmp_path, monkeypatch):
     # venv 入口不存在时不建软链（不抛）。
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
     link = tmp_path / ".local" / "bin" / "lark-listener"
     monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
     monkeypatch.setattr(service, "SHIM_LINK", link)
+    monkeypatch.setattr(service, "SHIM_RECORD", tmp_path / "shim_link")
 
     service.ensure_shim_link()
 

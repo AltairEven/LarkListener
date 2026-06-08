@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/AltairEven/LarkListener/main/instal
 lark-listener setup
 ```
 
-> 第一次如果提示 `command not found`，把命令换成完整路径 `~/.local/bin/lark-listener setup`；新开一个终端窗口后就能用短命令了。
+> 短命令 `lark-listener` 若提示 `command not found`，多半是 PATH 还没刷新——**重开一个终端窗口**即可（安装时已自动把它加入 PATH）。急用可先用完整路径 `~/.lark_listener/venv/bin/lark-listener setup`。
 
 最后启动服务：
 
