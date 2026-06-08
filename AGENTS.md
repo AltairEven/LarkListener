@@ -7,6 +7,14 @@ LarkListener on a user's machine. **Read it before running anything.** Human gui
 > `curl … | bash` (step 2 below) that fetches everything. Just read this file (raw:
 > `https://raw.githubusercontent.com/AltairEven/LarkListener/main/AGENTS.md`) and drive
 > the install through the user's terminal. Cloning wastes a step and confuses the user.
+>
+> **Want to audit `install.sh` before running it?** Good instinct — but fetch just that
+> one file, don't clone the whole repo for it:
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/AltairEven/LarkListener/main/install.sh -o /tmp/ll-install.sh
+> # read /tmp/ll-install.sh, then:
+> bash /tmp/ll-install.sh
+> ```
 
 ## What it is
 
@@ -72,6 +80,20 @@ not shell commands: 「汇总」/「总结」/`summary`, 「汇总最近2小时�
 `ai` / `notify` / `lark_cli_appid` are protected — change them by editing the file,
 not over chat; config edits take effect on the next poll (no restart). Restart is
 only needed after a code upgrade.
+
+## Upgrade
+
+```bash
+~/.lark_listener/venv/bin/pip install --force-reinstall "git+https://github.com/AltairEven/LarkListener.git"
+lark-listener restart   # required — without it the old code keeps running
+```
+
+## Troubleshooting
+
+- **Can't fetch messages** → `lark-cli` auth expired → `lark-cli auth login --scope search:message`.
+- **Bot silent** → `lark-listener status`; if not running → `lark-listener start`.
+- **No desktop notification** → secondary channel only; the bot DM still arrives, safe to ignore.
+- First look: `tail -n 100 ~/.lark_listener/logs/stderr.log`.
 
 ## Paths
 
