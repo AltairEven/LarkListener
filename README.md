@@ -72,6 +72,8 @@ lark-listener config     # 打开配置文件手动编辑
 lark-listener uninstall  # 彻底卸载（删服务、配置、全部数据）
 ```
 
+> `lark-listener status` 不只看运行状态，还会列出进程和所有文件位置（配置、日志、venv、launchd、短命令软链），排查或确认安装位置时很方便。
+
 ## 五、升级到新版本
 
 ```bash

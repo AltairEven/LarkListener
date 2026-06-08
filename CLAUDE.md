@@ -77,6 +77,25 @@ python3 -m pytest -q       # 全绿才算改完
 - 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。
 - 卸载：`lark-listener uninstall`（停服务、删 plist/软链/`~/.lark_listener`）。
 
+## 运行情况 & 文件布局（排查/清理用）
+
+`lark-listener status` 是诊断入口，输出：服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。
+
+- 进程构成：1 个主进程 `… lark-listener run`（launchd KeepAlive 守护）+ `lark-cli event` 监听子进程（node 壳 + Go 二进制，由监听线程拉起，断开会按间隔重连）。
+- 文件布局：
+  - `~/.lark_listener/`：`config.yaml`、`state.json`、`logs/`、`venv/`、`shim_link`（记录软链实际位置）
+  - `~/Library/LaunchAgents/com.larklistener.plist`：launchd 配置
+  - 短命令软链：位置见 `shim_link`（可能在 `~/.local/bin` 或 `/opt/homebrew/bin` 等）
+
+**手动清理**（`uninstall` 命令失效，或旧版无 `shim_link` 记录导致软链残留时）：
+```bash
+launchctl unload ~/Library/LaunchAgents/com.larklistener.plist 2>/dev/null
+pkill -f "/.lark_listener/venv/bin/lark-listener run"; pkill -f "lark-cli event.*--as bot"
+rm -f ~/Library/LaunchAgents/com.larklistener.plist
+rm -f ~/.local/bin/lark-listener /opt/homebrew/bin/lark-listener /usr/local/bin/lark-listener
+rm -rf ~/.lark_listener
+```
+
 ## 提交约定
 
 未经用户明确要求，**不要 `git commit` / `git push`**。`docs/` 被 gitignore（设计文档/计划不入库）。

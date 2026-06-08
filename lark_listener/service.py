@@ -180,14 +180,51 @@ def cmd_restart() -> None:
     cmd_start()
 
 
+def _pids(pattern: str) -> list[str]:
+    """匹配 pattern 的进程 PID 列表（best-effort）。"""
+    try:
+        out = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
+        return out.stdout.split()
+    except Exception:
+        return []
+
+
+def _recorded_shim() -> Optional[str]:
+    """install.sh 记录的短命令软链实际位置（若有）。"""
+    try:
+        return SHIM_RECORD.read_text().strip() or None
+    except OSError:
+        return None
+
+
 def cmd_status() -> None:
-    installed = PLIST_PATH.exists()
-    if not installed:
+    if not PLIST_PATH.exists():
         print("◇ 未安装")
     elif _is_running():
         print("● 服务运行中")
     else:
         print("○ 服务已安装，未运行")
+
+    main_pids = _pids(f"{VENV_DIR}/bin/lark-listener run")
+    event_pids = _pids("lark-cli event.*--as bot")
+    print("\n进程：")
+    print(f"  主进程 (lark-listener run)  : {' '.join(main_pids) or '无'}")
+    print(f"  监听子进程 (lark-cli event) : {' '.join(event_pids) or '无'}")
+
+    def mark(p: Path) -> str:
+        return "✓" if (p.exists() or p.is_symlink()) else "—"
+
+    shim = _recorded_shim()
+    print("\n文件位置：")
+    print(f"  配置     {mark(LISTENER_HOME / 'config.yaml')} {LISTENER_HOME / 'config.yaml'}")
+    print(f"  状态     {mark(LISTENER_HOME / 'state.json')} {LISTENER_HOME / 'state.json'}")
+    print(f"  日志     {mark(LISTENER_HOME / 'logs')} {LISTENER_HOME / 'logs'}/")
+    print(f"  venv     {mark(VENV_DIR)} {VENV_DIR}")
+    print(f"  launchd  {mark(PLIST_PATH)} {PLIST_PATH}")
+    if shim:
+        print(f"  短命令   {mark(Path(shim))} {shim}")
+    else:
+        print(f"  短命令   {mark(SHIM_LINK)} {SHIM_LINK}（默认位置）")
 
 
 def cmd_config() -> None:
