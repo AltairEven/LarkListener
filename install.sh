@@ -50,13 +50,26 @@ fi
 "$VENV/bin/pip" install --upgrade pip >/dev/null
 "$VENV/bin/pip" install --force-reinstall "git+$REPO"
 
-# 6) 软链短命令到 ~/.local/bin（plist 另指向 venv 内真实入口，软链仅为短命令）
-mkdir -p "$HOME/.local/bin"
-ln -sf "$VENV/bin/lark-listener" "$SHIM"
-echo "✓ 已安装，短命令软链：$SHIM"
+# 6) 软链短命令到 ~/.local/bin（best-effort：失败不影响安装，仍可用 venv 绝对路径）
+#    plist 另指向 venv 内真实入口，软链仅为短命令便利。
+SHIM_OK=false
+if mkdir -p "$HOME/.local/bin" 2>/dev/null && ln -sf "$VENV/bin/lark-listener" "$SHIM" 2>/dev/null; then
+    SHIM_OK=true
+    echo "✓ 已安装，短命令软链：$SHIM"
+else
+    echo "⚠️  无法在 ~/.local/bin 创建短命令软链（目录不可写）——不影响使用，用绝对路径即可。"
+fi
 
-# 7) 结尾：提示手动跑 setup（用绝对路径，不依赖 PATH 刷新）
+# 7) 结尾：提示手动跑 setup（始终给一定可用的 venv 绝对路径）
 echo ""
-echo "✅ 安装完成。现在运行："
-echo "   ~/.local/bin/lark-listener setup"
-echo "（新开终端后，若 ~/.local/bin 在 PATH，可直接用 lark-listener setup）"
+echo "✅ 安装完成。现在运行配置向导："
+if $SHIM_OK; then
+    echo "   lark-listener setup"
+    echo "   （若提示 command not found，说明 ~/.local/bin 不在 PATH，请改用：$VENV/bin/lark-listener setup）"
+else
+    echo "   $VENV/bin/lark-listener setup"
+    echo ""
+    echo "   想用短命令 lark-listener？修复 ~/.local/bin 写权限后重建软链："
+    echo "     sudo chown \$(whoami) ~/.local/bin"
+    echo "     ln -sf $VENV/bin/lark-listener ~/.local/bin/lark-listener"
+fi
