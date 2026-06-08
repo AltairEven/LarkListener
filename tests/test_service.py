@@ -1,7 +1,7 @@
 import importlib
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from lark_listener import service
 
 
@@ -161,3 +161,89 @@ def test_build_plist_passes_dev_env_to_launchd(monkeypatch):
         monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
         monkeypatch.delenv("LARK_LISTENER_LABEL", raising=False)
         importlib.reload(service)
+
+
+# --- _is_running exact label match (review 🟢) ---
+
+
+def test_is_running_exact_match_not_prefix():
+    """A dev job `com.larklistener.dev` must NOT make prod LABEL `com.larklistener`
+    report running — launchctl list lines are matched by exact trailing label."""
+    assert service.LABEL == "com.larklistener"  # default (no env)
+    out = MagicMock(stdout="-\t0\tcom.larklistener.dev\n123\t0\tcom.apple.foo\n")
+    with patch("lark_listener.service.subprocess.run", return_value=out):
+        assert service._is_running() is False
+
+    out2 = MagicMock(stdout="123\t0\tcom.larklistener\n-\t0\tcom.larklistener.dev\n")
+    with patch("lark_listener.service.subprocess.run", return_value=out2):
+        assert service._is_running() is True
+
+
+# --- build_plist XML escaping (review 🟢) ---
+
+
+def test_build_plist_escapes_xml_special_chars(monkeypatch):
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+    xml = service.build_plist("/Users/a&b/bin/lark-listener", ["/x<y>/bin"])
+    assert "&amp;" in xml
+    assert "/Users/a&b/" not in xml  # raw ampersand must not leak (would be invalid XML)
+    assert "&lt;y&gt;" in xml
+
+
+# --- cmd_start idempotent load (review #5) ---
+
+
+def test_cmd_start_unloads_before_load(tmp_path, monkeypatch):
+    """load must be preceded by an unload even when not currently running, so a
+    job stuck in 'loaded-but-not-running' (throttled) state loads cleanly."""
+    plist = tmp_path / "x.plist"
+    plist.write_text("<plist/>")
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "_is_running", lambda: False)
+    monkeypatch.setattr(service.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return MagicMock(returncode=0, stdout="")
+
+    monkeypatch.setattr(service.subprocess, "run", fake_run)
+    service.cmd_start()
+
+    launchctl = [c for c in calls if c[:1] == ["launchctl"]]
+    unload_idx = next(i for i, c in enumerate(launchctl) if c[:2] == ["launchctl", "unload"])
+    load_idx = next(i for i, c in enumerate(launchctl) if c[:2] == ["launchctl", "load"])
+    assert unload_idx < load_idx
+
+
+# --- cmd_uninstall cleanup (review test blind spot) ---
+
+
+def test_cmd_uninstall_removes_recorded_shim_plist_and_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    record = home / "shim_link"
+    venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
+    venv_exe.parent.mkdir(parents=True)
+    venv_exe.write_text("#!/bin/sh\n")
+    shim = tmp_path / "elsewhere" / "lark-listener"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(venv_exe)
+    record.write_text(str(shim) + "\n")
+    plist = tmp_path / "com.larklistener.plist"
+    plist.write_text("<plist/>")
+    default_link = tmp_path / "default" / "lark-listener"
+
+    monkeypatch.setattr(service, "LISTENER_HOME", home)
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "SHIM_RECORD", record)
+    monkeypatch.setattr(service, "SHIM_LINK", default_link)
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+
+    with patch("builtins.input", return_value="y"):
+        service.cmd_uninstall()
+
+    assert not plist.exists()
+    assert not shim.exists()        # recorded shim (in another dir) removed
+    assert not home.exists()        # data dir (incl. record) rmtree'd

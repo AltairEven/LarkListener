@@ -291,6 +291,32 @@ def test_notify_sends_message_and_notification(mock_run, mock_resolve):
     assert second_call_args[0].endswith("terminal-notifier")
 
 
+@patch("lark_listener.notifier.resolve_executable", side_effect=lambda n: "/opt/homebrew/bin/" + n)
+@patch("lark_listener.notifier.subprocess.run")
+def test_notify_survives_failing_bot_message(mock_run, mock_resolve):
+    """A failing bot send (lark-cli missing/timeout) must NOT crash notify.
+
+    Otherwise the exception propagates out of poll_once before the caller
+    advances state.last_poll_time, freezing the start time and re-pushing the
+    same summary every cycle. The bot send is best-effort like the desktop toast.
+    """
+    import subprocess as _sp
+
+    def side_effect(cmd, *args, **kwargs):
+        if cmd[0].endswith("lark-cli"):
+            raise _sp.TimeoutExpired(cmd="lark-cli", timeout=30)
+        return MagicMock(returncode=0, stdout="")
+
+    mock_run.side_effect = side_effect
+    notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
+
+    # Must not raise even though the bot message fails.
+    notifier.notify(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", my_user_id=MY_USER_ID)
+
+    # The desktop toast (secondary channel) must still have been attempted.
+    assert any(c[0][0][0].endswith("terminal-notifier") for c in mock_run.call_args_list)
+
+
 @patch("lark_listener.notifier.subprocess.run")
 def test_notify_skips_when_no_messages(mock_run):
     notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")

@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from lark_listener.analyzer import _extract_json
 from lark_listener.config_editor import PROTECTED
 
 logger = logging.getLogger("lark_listener")
 TZ = timezone(timedelta(hours=8))
+
+# 意图分类是轻量调用（max_tokens 512），但仍需上限避免 SDK 默认 600s 卡死轮询线程。
+INTENT_TIMEOUT = 60
 
 INTENT_PROMPT = """\
 当前时间：{now}
@@ -67,14 +71,16 @@ def _call_ai(prompt: str, ai_cfg: dict) -> str:
         import openai
         client = openai.OpenAI(api_key=api_key, base_url=ai_cfg.get("base_url") or None)
         resp = client.chat.completions.create(
-            model=ai_cfg["model"], messages=[{"role": "user", "content": prompt}])
+            model=ai_cfg["model"], messages=[{"role": "user", "content": prompt}],
+            timeout=INTENT_TIMEOUT)
         return resp.choices[0].message.content
     if provider == "claude":
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=ai_cfg["model"], max_tokens=512,
-            messages=[{"role": "user", "content": prompt}])
+            messages=[{"role": "user", "content": prompt}],
+            timeout=INTENT_TIMEOUT)
         return resp.content[0].text
     if provider == "ollama":
         import urllib.request
@@ -101,10 +107,16 @@ def parse(message: str, config: dict) -> Intent:
         message=message,
     )
     try:
-        result = json.loads(_call_ai(prompt, ai_cfg))
+        # 复用 analyzer 的容错解析：容忍 ```json 围栏与前后说明文字（本地小模型常见），
+        # 否则会误判为 error 回「没太听懂」。
+        result = _extract_json(_call_ai(prompt, ai_cfg))
     except Exception:
         logger.exception("Failed to parse intent from message: %s", message)
         return Intent(type="error")
+
+    if not isinstance(result, dict):
+        # 模型回了数组/标量而非对象 → 当作无法识别，避免下面 .get 抛异常。
+        return Intent(type="none")
 
     itype = result.get("type", "none")
     if itype == "summary":
@@ -112,6 +124,10 @@ def parse(message: str, config: dict) -> Intent:
         if result.get("start_time"):
             try:
                 start = datetime.fromisoformat(result["start_time"])
+                # 本地模型常给不带时区的串；统一钉到 +08:00，否则与 aware 的 end
+                # 混用会让 lark-cli 搜索区间整体偏移 8 小时。
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=TZ)
             except (ValueError, TypeError):
                 logger.warning("Invalid start_time from AI: %r", result.get("start_time"))
         return Intent(type="summary", start_time=start)

@@ -23,8 +23,19 @@ def ai_packages_for(provider: str) -> list[str]:
     }.get(provider, [])
 
 
+def _venv_python() -> str:
+    """守护进程实际运行所在的 venv python，不存在则回退当前解释器。
+
+    务必装进 venv：plist 指向 venv/bin/lark-listener，守护 `run` 在 venv 内 import
+    SDK。若 setup 经「本地 pip 直装」启动，sys.executable 可能是系统/CLT python，
+    把 SDK 装到 venv 之外会让运行时 import 不到（且 PEP 668 系统上 pip 还会直接失败）。
+    """
+    py = service.VENV_DIR / "bin" / "python"
+    return str(py) if py.exists() else sys.executable
+
+
 def _pip_install_ai(provider: str) -> None:
-    """按 AI 后端把对应 SDK 装进当前 venv（`sys.executable` 即 venv 的 python）。
+    """按 AI 后端把对应 SDK 装进守护进程所在的 venv（见 _venv_python）。
 
     只是给 venv 增装一个依赖包（守护进程 `run` 之后才 import 它），不是「进程重装
     自己」，无自我覆盖问题。幂等：已装则 pip 立即跳过。失败仅警告、不中断 setup。
@@ -35,7 +46,7 @@ def _pip_install_ai(provider: str) -> None:
         return
     print(f"安装 AI 依赖（{provider}）：{' '.join(pkgs)} ...")
     try:
-        result = subprocess.run([sys.executable, "-m", "pip", "install", *pkgs])
+        result = subprocess.run([_venv_python(), "-m", "pip", "install", *pkgs])
         if result.returncode == 0:
             print("✓ AI 依赖已安装")
         else:

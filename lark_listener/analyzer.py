@@ -14,6 +14,10 @@ logger = logging.getLogger("lark_listener")
 
 SYSTEM_PROMPT = "你是消息分析助手。请严格输出 JSON 数组，不要输出其他内容。"
 
+# AI 调用上限（秒）。SDK 默认 600s，在主轮询线程里会让服务对触发/关停长时间无响应；
+# 设为略大于 estimate_ai_seconds 的上限（180），超时则按异常降级为无 AI 汇总。
+AI_TIMEOUT = 180
+
 USER_PROMPT_TEMPLATE = """\
 用户关注的关键词：{keywords}
 
@@ -198,8 +202,23 @@ class Analyzer:
             logger.exception("AI analysis failed, sending summary without it")
             return {}
 
+        # 模型本应返回数组，但可能给出 {"results": [...]} 包裹、单个会话对象，或
+        # 夹带非 dict 元素。逐种归一后再逐项跳过坏数据，避免一处脏数据丢整批。
+        if isinstance(raw_results, dict):
+            if isinstance(raw_results.get("results"), list):
+                raw_results = raw_results["results"]
+            elif raw_results.get("conversation_id"):
+                raw_results = [raw_results]  # 裸的单会话对象 → 当作单元素数组
+            else:
+                raw_results = []
+        if not isinstance(raw_results, list):
+            logger.warning("AI returned non-list analysis (%s), skipping", type(raw_results).__name__)
+            return {}
+
         results = {}
         for item in raw_results:
+            if not isinstance(item, dict):
+                continue
             cid = item.get("conversation_id", "")
             results[cid] = ConversationAnalysis(
                 conversation_id=cid,
@@ -229,6 +248,7 @@ class Analyzer:
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
+            timeout=AI_TIMEOUT,
         )
         return _extract_json(response.content[0].text)
 
@@ -245,6 +265,7 @@ class Analyzer:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            timeout=AI_TIMEOUT,
         )
         return _extract_json(response.choices[0].message.content)
 

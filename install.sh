@@ -47,7 +47,10 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 
 # 5) 安装本工具（venv 内 pip）
-"$VENV/bin/pip" install --upgrade pip >/dev/null
+#    pip 升级非致命（wheel 安装通常不需要新 pip）：set -e 下若静默退出会让用户无从判断，
+#    故显式兜底并提示，不中断安装。
+"$VENV/bin/pip" install --upgrade pip >/dev/null 2>&1 \
+    || echo "⚠️  pip 升级失败（继续；若下一步安装失败请检查网络）"
 "$VENV/bin/pip" install --force-reinstall "git+$REPO"
 
 # 6) 软链短命令（ensurepath 式，best-effort）。plist 另指向 venv 真实入口，软链仅为便利。
@@ -78,7 +81,9 @@ if $SHIM_OK && ! $IN_PATH; then
         zsh)  RC="$HOME/.zshrc" ;;
         *)    RC="$HOME/.profile" ;;
     esac
-    if [ -f "$RC" ] && grep -qF "$SHIM_DIR" "$RC" 2>/dev/null; then
+    # 用安装器自己的标记行判断是否已注入，而非裸目录名——后者可能因 rc 里
+    # 别处提到该路径而误判为已注入，从而跳过本该做的注入。
+    if [ -f "$RC" ] && grep -qF "# Added by LarkListener installer" "$RC" 2>/dev/null; then
         PATH_INJECTED=true   # 已注入过
     elif printf '\n# Added by LarkListener installer\nexport PATH="%s:$PATH"\n' "$SHIM_DIR" >> "$RC" 2>/dev/null; then
         PATH_INJECTED=true

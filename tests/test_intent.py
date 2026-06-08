@@ -1,4 +1,5 @@
 import json as _json
+import sys
 from unittest.mock import patch, MagicMock
 
 from lark_listener import intent
@@ -63,6 +64,70 @@ def test_bad_json_returns_error(mock_urlopen):
     resp.read.return_value = _json.dumps({"message": {"content": "not json"}}).encode()
     mock_urlopen.return_value.__enter__.return_value = resp
     assert intent.parse("???", _CONFIG).type == "error"
+
+
+@patch("urllib.request.urlopen")
+def test_parse_tolerates_markdown_fenced_json(mock_urlopen):
+    """Models (esp. local ollama) often wrap JSON in ```json fences. Intent must
+    tolerate that like the analyzer does, instead of falling back to 'error'."""
+    resp = MagicMock()
+    fenced = '```json\n{"type": "config_view"}\n```'
+    resp.read.return_value = _json.dumps({"message": {"content": fenced}}).encode()
+    mock_urlopen.return_value.__enter__.return_value = resp
+    assert intent.parse("当前配置", _CONFIG).type == "config_view"
+
+
+@patch("urllib.request.urlopen")
+def test_parse_tolerates_json_with_surrounding_prose(mock_urlopen):
+    resp = MagicMock()
+    content = '好的：\n{"type": "confirm"}\n以上'
+    resp.read.return_value = _json.dumps({"message": {"content": content}}).encode()
+    mock_urlopen.return_value.__enter__.return_value = resp
+    assert intent.parse("确认", _CONFIG).type == "confirm"
+
+
+def test_intent_call_claude_passes_timeout():
+    fake = MagicMock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text='{"type":"none"}')]
+    cfg = {"ai": {"provider": "claude", "model": "m", "api_key": "k", "base_url": ""}}
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        intent.parse("你好", cfg)
+    kwargs = fake.Anthropic.return_value.messages.create.call_args.kwargs
+    assert kwargs.get("timeout") == intent.INTENT_TIMEOUT
+
+
+def test_intent_call_openai_passes_timeout():
+    fake = MagicMock()
+    fake.OpenAI.return_value.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content='{"type":"none"}'))
+    ]
+    cfg = {"ai": {"provider": "openai", "model": "m", "api_key": "k", "base_url": ""}}
+    with patch.dict(sys.modules, {"openai": fake}):
+        intent.parse("你好", cfg)
+    kwargs = fake.OpenAI.return_value.chat.completions.create.call_args.kwargs
+    assert kwargs.get("timeout") == intent.INTENT_TIMEOUT
+
+
+@patch("urllib.request.urlopen")
+def test_summary_naive_start_time_gets_local_tz(mock_urlopen):
+    """A naive start_time from the AI (local models often omit the offset) must be
+    pinned to +08:00, else it mixes with the aware `end` and skews the search window."""
+    _mock_ollama(mock_urlopen, {"type": "summary", "start_time": "2026-06-08T10:00:00"})
+    result = intent.parse("汇总今天上午", _CONFIG)
+    assert result.type == "summary"
+    assert result.start_time is not None
+    assert result.start_time.utcoffset() is not None
+    assert result.start_time.utcoffset().total_seconds() == 8 * 3600
+
+
+@patch("urllib.request.urlopen")
+def test_non_dict_result_returns_none(mock_urlopen):
+    """If the model returns a JSON array/scalar instead of an object, classify as
+    none instead of crashing on `.get`."""
+    resp = MagicMock()
+    resp.read.return_value = _json.dumps({"message": {"content": "[1, 2, 3]"}}).encode()
+    mock_urlopen.return_value.__enter__.return_value = resp
+    assert intent.parse("你好", _CONFIG).type == "none"
 
 
 def test_editable_config_strips_protected():

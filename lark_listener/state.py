@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
 MAX_PROCESSED_IDS = 1000
+TZ = timezone(timedelta(hours=8))
 
 logger = logging.getLogger("lark_listener")
 
@@ -29,7 +30,10 @@ class State:
             with open(self._path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("last_poll_time"):
-                self.last_poll_time = datetime.fromisoformat(data["last_poll_time"])
+                dt = datetime.fromisoformat(data["last_poll_time"])
+                # 归一到 +08:00：旧版/手写的 naive 串若与 aware 的 now 相减/比较会
+                # TypeError。正常落盘的是 aware，这里只兜底 naive。
+                self.last_poll_time = dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt
             ids = data.get("processed_message_ids", [])
             self._ordered_ids = list(ids)
             self.processed_message_ids = set(ids)

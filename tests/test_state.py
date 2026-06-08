@@ -15,6 +15,20 @@ def test_state_fresh_start(tmp_path):
     assert state.processed_message_ids == set()
 
 
+def test_state_loads_naive_last_poll_time_as_local_tz(tmp_path):
+    """A naive last_poll_time in state.json (legacy/hand-written) must be pinned to
+    +08:00 on load, so it never mixes with aware datetimes downstream."""
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "last_poll_time": "2026-06-08T10:00:00",  # no offset
+        "processed_message_ids": [],
+    }))
+    state = State(str(path))
+    assert state.last_poll_time is not None
+    assert state.last_poll_time.utcoffset() is not None
+    assert state.last_poll_time.utcoffset().total_seconds() == 8 * 3600
+
+
 def test_state_save_and_load(tmp_path):
     path = str(tmp_path / "state.json")
     state = State(path)

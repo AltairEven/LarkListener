@@ -50,6 +50,23 @@ notify:
         load_config(str(config_file))
 
 
+def test_load_config_missing_bot_chat_id_raises(tmp_path):
+    """Missing notify.bot_chat_id must fail at load, not later with a KeyError in
+    poll_once after messages were fetched/analyzed (which would freeze state)."""
+    bad = """\
+lark_cli_appid: cli_test
+ai:
+  provider: claude
+  model: claude-sonnet-4-6
+notify:
+  user_id: ou_test
+"""
+    config_file = tmp_path / "bad.yaml"
+    config_file.write_text(bad)
+    with pytest.raises(ValueError, match="bot_chat_id"):
+        load_config(str(config_file))
+
+
 def test_load_config_missing_ai_provider_raises(tmp_path):
     bad = """\
 ai:

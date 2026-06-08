@@ -39,6 +39,12 @@ def _validate(config: dict) -> None:
         raise ValueError(
             "配置缺少必需字段 notify.user_id，请检查 ~/.lark_listener/config.yaml"
         )
+    if not notify.get("bot_chat_id"):
+        # poll_once 推送时用下标取 bot_chat_id（main.py），缺失会在抓取+分析之后才
+        # KeyError 崩溃，使 last_poll_time 不前进、陷入重复轮询。启动期就拦下。
+        raise ValueError(
+            "配置缺少必需字段 notify.bot_chat_id，请检查 ~/.lark_listener/config.yaml"
+        )
     ai = config.get("ai")
     if not isinstance(ai, dict) or not ai.get("provider") or not ai.get("model"):
         raise ValueError(
