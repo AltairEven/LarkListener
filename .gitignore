@@ -5,3 +5,6 @@ dist/
 *.egg-info/
 *.spec
 .claude/
+docs/
+.venv/
+venv/

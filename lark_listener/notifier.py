@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from typing import Any, Optional
 
@@ -10,6 +11,16 @@ from lark_listener.binaries import lark_cli, resolve_executable
 from lark_listener.fetcher import MessageCategory
 
 logger = logging.getLogger("lark_listener")
+
+
+def _applescript_escape(s: str) -> str:
+    """Escape a string for embedding in an AppleScript double-quoted literal.
+
+    Backslash must be escaped first, otherwise the backslashes we add for quotes
+    would themselves be re-escaped.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
 
 URGENCY_ICON = {
     "urgent": "🔴",
@@ -219,13 +230,24 @@ class Notifier:
 
         open_url = f"https://applink.feishu.cn/client/chat/open?openChatId={self.bot_chat_id}"
 
-        cmd = [
-            resolve_executable("terminal-notifier"),
-            "-title", "LarkListener",
-            "-subtitle", "有新消息汇总",
-            "-message", message,
-            "-open", open_url,
-        ]
+        # 优先 terminal-notifier（解析到绝对路径才算装了），它支持点击跳转飞书会话；
+        # 否则退回系统原生 osascript（零依赖，但点击不可跳转）。
+        tn = resolve_executable("terminal-notifier")
+        if os.path.isabs(tn):
+            cmd = [
+                tn,
+                "-title", "LarkListener",
+                "-subtitle", "有新消息汇总",
+                "-message", message,
+                "-open", open_url,
+            ]
+        else:
+            title = _applescript_escape("LarkListener")
+            body = _applescript_escape(message)
+            cmd = [
+                resolve_executable("osascript"),
+                "-e", f'display notification "{body}" with title "{title}"',
+            ]
         # Best-effort: the desktop toast is a secondary channel (the bot message
         # is the primary delivery and was already sent above). A missing
         # terminal-notifier or any subprocess failure must NOT propagate — it
@@ -234,8 +256,4 @@ class Notifier:
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         except Exception as e:
-            logger.warning(
-                "Desktop notification skipped (%s). "
-                "Install it with: brew install terminal-notifier",
-                e,
-            )
+            logger.warning("Desktop notification skipped (%s).", e)

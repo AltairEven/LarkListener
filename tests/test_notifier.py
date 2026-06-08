@@ -2,6 +2,7 @@ from unittest.mock import patch, MagicMock
 from lark_listener.notifier import Notifier, build_summary_text
 from lark_listener.fetcher import MessageCategory
 from lark_listener.analyzer import ConversationAnalysis
+from lark_listener.notifier import _applescript_escape
 
 
 MY_USER_ID = "ou_me"
@@ -270,8 +271,9 @@ def test_build_summary_section_order():
 # --- Notifier tests ---
 
 
+@patch("lark_listener.notifier.resolve_executable", side_effect=lambda n: "/opt/homebrew/bin/" + n)
 @patch("lark_listener.notifier.subprocess.run")
-def test_notify_sends_message_and_notification(mock_run):
+def test_notify_sends_message_and_notification(mock_run, mock_resolve):
     mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": true}')
     notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
     notifier.notify(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", my_user_id=MY_USER_ID)
@@ -298,8 +300,9 @@ def test_notify_skips_when_no_messages(mock_run):
     mock_run.assert_not_called()
 
 
+@patch("lark_listener.notifier.resolve_executable", side_effect=lambda n: "/opt/homebrew/bin/" + n)
 @patch("lark_listener.notifier.subprocess.run")
-def test_notify_macos_notification_counts(mock_run):
+def test_notify_macos_notification_counts(mock_run, mock_resolve):
     """macOS notification should show correct conversation counts."""
     mock_run.return_value = MagicMock(returncode=0, stdout="")
     notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
@@ -315,8 +318,9 @@ def test_notify_macos_notification_counts(mock_run):
     assert "1个关键词命中" in message_text
 
 
+@patch("lark_listener.notifier.resolve_executable", side_effect=lambda n: "/opt/homebrew/bin/" + n)
 @patch("lark_listener.notifier.subprocess.run")
-def test_notify_survives_failing_desktop_notification(mock_run):
+def test_notify_survives_failing_desktop_notification(mock_run, mock_resolve):
     """A missing/failing terminal-notifier must NOT crash notify.
 
     The bot message is the primary channel and is sent first; the macOS toast is
@@ -354,3 +358,48 @@ def test_notify_skips_only_self_messages(mock_run):
     notifier.notify(messages, {}, "15:00", "15:30", my_user_id=MY_USER_ID)
 
     mock_run.assert_not_called()
+
+
+def test_applescript_escape_quotes_and_backslashes():
+    assert _applescript_escape('a"b') == 'a\\"b'
+    assert _applescript_escape("a\\b") == "a\\\\b"
+    # 反斜杠先转义，避免把已转义的引号再次破坏
+    assert _applescript_escape('x"\\y') == 'x\\"\\\\y'
+
+
+@patch("lark_listener.notifier.resolve_executable")
+@patch("lark_listener.notifier.subprocess.run")
+def test_notify_uses_osascript_when_no_terminal_notifier(mock_run, mock_resolve):
+    # terminal-notifier 未安装 → resolve 返回裸名；osascript 解析到绝对路径。
+    def resolve(name):
+        return "terminal-notifier" if name == "terminal-notifier" else "/usr/bin/" + name
+    mock_resolve.side_effect = resolve
+    mock_run.return_value = MagicMock(returncode=0, stdout="")
+
+    notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
+    notifier.notify(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", my_user_id=MY_USER_ID)
+
+    assert mock_run.call_count == 2
+    second = mock_run.call_args_list[1][0][0]
+    assert second[0].endswith("osascript")
+    assert "-e" in second
+    script = second[second.index("-e") + 1]
+    assert "display notification" in script
+    assert "1个私聊" in script
+
+
+@patch("lark_listener.notifier.resolve_executable")
+@patch("lark_listener.notifier.subprocess.run")
+def test_notify_prefers_terminal_notifier_when_present(mock_run, mock_resolve):
+    # terminal-notifier 解析到绝对路径 → 走它，保留 -open 点击跳转。
+    def resolve(name):
+        return "/opt/homebrew/bin/" + name
+    mock_resolve.side_effect = resolve
+    mock_run.return_value = MagicMock(returncode=0, stdout="")
+
+    notifier = Notifier(user_id="ou_test", bot_chat_id="oc_test")
+    notifier.notify(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", my_user_id=MY_USER_ID)
+
+    second = mock_run.call_args_list[1][0][0]
+    assert second[0].endswith("terminal-notifier")
+    assert "-open" in second

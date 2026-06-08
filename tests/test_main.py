@@ -312,3 +312,27 @@ def test_dispatch_error_replies_not_understood(mock_parse, mock_reply, tmp_path)
     mock_parse.return_value = Intent(type="error")
     main_mod._handle_message("???", "ou_test", config_path, state_path)
     assert "帮助" in mock_reply.call_args.args[1]
+
+
+import sys as _sys
+
+
+@patch("lark_listener.main.run")
+def test_main_run_subcommand_invokes_run(mock_run, monkeypatch):
+    monkeypatch.setattr(_sys, "argv", ["lark-listener", "run"])
+    main_mod.main()
+    mock_run.assert_called_once()
+
+
+@patch("lark_listener.main.run")
+def test_main_no_subcommand_does_not_run(mock_run, monkeypatch):
+    monkeypatch.setattr(_sys, "argv", ["lark-listener"])
+    main_mod.main()
+    mock_run.assert_not_called()
+
+
+@patch("lark_listener.service.cmd_start")
+def test_main_start_subcommand_dispatches_to_service(mock_start, monkeypatch):
+    monkeypatch.setattr(_sys, "argv", ["lark-listener", "start"])
+    main_mod.main()
+    mock_start.assert_called_once()

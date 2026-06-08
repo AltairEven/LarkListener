@@ -5,10 +5,21 @@ description = "Local background service that polls Feishu for unread messages an
 requires-python = ">=3.9"
 dependencies = [
     "pyyaml>=6.0",
-    "anthropic>=0.30.0",
-    "openai>=1.30.0",
     "ruamel.yaml>=0.18",
 ]
 
+# AI SDK 按后端按需安装（见 setup 向导）。analyzer/intent 均延迟 import，
+# 故核心可不带这两个包运行；ollama 用标准库 urllib 直连，无需任何 SDK。
+[project.optional-dependencies]
+claude = ["anthropic>=0.30.0"]
+openai = ["openai>=1.30.0"]
+
 [project.scripts]
 lark-listener = "lark_listener.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lark_listener*"]

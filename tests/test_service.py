@@ -1,0 +1,122 @@
+import importlib
+import os
+from pathlib import Path
+from unittest.mock import patch
+from lark_listener import service
+
+
+def test_env_overrides_home_and_label(monkeypatch):
+    # 设了 env 后重载模块，常量应反映覆盖值；plist 文件名随 Label 派生。
+    monkeypatch.setenv("LARK_LISTENER_HOME", "/tmp/ll-test-home")
+    monkeypatch.setenv("LARK_LISTENER_LABEL", "com.larklistener.test")
+    try:
+        importlib.reload(service)
+        assert str(service.LISTENER_HOME) == "/tmp/ll-test-home"
+        assert str(service.VENV_DIR) == "/tmp/ll-test-home/venv"
+        assert service.LABEL == "com.larklistener.test"
+        assert service.PLIST_PATH.name == "com.larklistener.test.plist"
+    finally:
+        monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+        monkeypatch.delenv("LARK_LISTENER_LABEL", raising=False)
+        importlib.reload(service)  # 复原默认，避免污染其它测试
+
+
+def test_defaults_without_env():
+    # 默认（无 env）：~/.lark_listener 与 com.larklistener。
+    assert str(service.LISTENER_HOME) == str(Path.home() / ".lark_listener")
+    assert service.LABEL == "com.larklistener"
+    assert service.PLIST_PATH.name == "com.larklistener.plist"
+
+
+def test_shim_path_points_into_venv():
+    p = service.shim_path()
+    assert os.path.isabs(p)
+    assert p.endswith("/.lark_listener/venv/bin/lark-listener")
+
+
+def test_ensure_shim_link_creates_symlink(tmp_path, monkeypatch):
+    # 用临时目录模拟 venv 入口与 ~/.local/bin，验证软链建立且指向 venv 入口。
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)  # 确保非 dev 隔离态
+    venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
+    venv_exe.parent.mkdir(parents=True)
+    venv_exe.write_text("#!/bin/sh\n")
+    link = tmp_path / ".local" / "bin" / "lark-listener"
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "SHIM_LINK", link)
+
+    service.ensure_shim_link()
+
+    assert link.is_symlink()
+    assert os.path.realpath(link) == os.path.realpath(venv_exe)
+
+
+def test_ensure_shim_link_skips_in_dev_mode(tmp_path, monkeypatch):
+    # 开发隔离态（设了 LARK_LISTENER_HOME）即使 venv 入口存在也不建软链，
+    # 绝不覆盖生产的 ~/.local/bin/lark-listener。
+    monkeypatch.setenv("LARK_LISTENER_HOME", str(tmp_path / "dev-home"))
+    venv_exe = tmp_path / "venv" / "bin" / "lark-listener"
+    venv_exe.parent.mkdir(parents=True)
+    venv_exe.write_text("#!/bin/sh\n")
+    link = tmp_path / ".local" / "bin" / "lark-listener"
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "SHIM_LINK", link)
+
+    service.ensure_shim_link()
+
+    assert not link.exists()  # dev 态跳过，未建软链
+
+
+def test_ensure_shim_link_noop_when_venv_missing(tmp_path, monkeypatch):
+    # venv 入口不存在时不建软链（不抛）。
+    link = tmp_path / ".local" / "bin" / "lark-listener"
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "SHIM_LINK", link)
+
+    service.ensure_shim_link()
+
+    assert not link.exists()
+
+
+def test_node_bin_dir_returns_dirname():
+    with patch("lark_listener.service.shutil.which", return_value="/Users/x/.nvm/versions/node/v20/bin/node"):
+        assert service.node_bin_dir() == "/Users/x/.nvm/versions/node/v20/bin"
+
+
+def test_node_bin_dir_none_when_missing():
+    with patch("lark_listener.service.shutil.which", return_value=None):
+        assert service.node_bin_dir() is None
+
+
+def test_build_plist_uses_absolute_program_and_run(monkeypatch):
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+    xml = service.build_plist("/Users/x/.local/bin/lark-listener", ["/Users/x/.nvm/versions/node/v20/bin"])
+    assert "<string>/Users/x/.local/bin/lark-listener</string>" in xml
+    assert "<string>run</string>" in xml
+    # launchd 不展开 ~，确保没有波浪号路径漏进 plist
+    assert "~/" not in xml
+    # 动态解析的 node 目录并入 PATH
+    assert "/Users/x/.nvm/versions/node/v20/bin" in xml
+    assert "com.larklistener" in xml
+    # 日志路径指向 LISTENER_HOME/logs
+    assert "/.lark_listener/logs/stdout.log" in xml
+    assert "/.lark_listener/logs/stderr.log" in xml
+    # 生产态（无 dev env）只透传 PATH，不写 LARK_LISTENER_HOME
+    assert "LARK_LISTENER_HOME" not in xml
+
+
+def test_build_plist_passes_dev_env_to_launchd(monkeypatch):
+    # 开发隔离态：plist 必须把 LARK_LISTENER_HOME/LABEL 写进 EnvironmentVariables，
+    # 否则 launchd 起的 run 服务读不到 dev 配置（会回退到生产路径）。
+    monkeypatch.setenv("LARK_LISTENER_HOME", "/tmp/devhome")
+    monkeypatch.setenv("LARK_LISTENER_LABEL", "com.larklistener.dev")
+    try:
+        importlib.reload(service)
+        xml = service.build_plist("/tmp/devhome/venv/bin/lark-listener", [])
+        assert "<key>LARK_LISTENER_HOME</key>" in xml
+        assert "<string>/tmp/devhome</string>" in xml
+        assert "<key>LARK_LISTENER_LABEL</key>" in xml
+        assert "<string>com.larklistener.dev</string>" in xml
+    finally:
+        monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+        monkeypatch.delenv("LARK_LISTENER_LABEL", raising=False)
+        importlib.reload(service)
