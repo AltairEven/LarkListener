@@ -3,6 +3,11 @@
 This file is for AI coding agents (Claude Code, etc.) installing or operating
 LarkListener on a user's machine. **Read it before running anything.** Human guide: [README.md](README.md).
 
+> **🚫 Do NOT clone this repo.** You don't need the source — installation is a single
+> `curl … | bash` (step 2 below) that fetches everything. Just read this file (raw:
+> `https://raw.githubusercontent.com/AltairEven/LarkListener/main/AGENTS.md`) and drive
+> the install through the user's terminal. Cloning wastes a step and confuses the user.
+
 ## What it is
 
 macOS-only background service (launchd): periodically pulls the user's Feishu/Lark

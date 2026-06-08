@@ -2,6 +2,8 @@
 
 让飞书 Bot 帮你盯消息：定时把你的飞书未读消息收集起来，用 AI 理一遍，再通过 Bot 私聊把**重点汇总**发给你，并弹一个 macOS 桌面通知。不用一直盯着飞书，也不会漏掉重要消息。
 
+> 🤖 **AI agent / Claude Code 在帮用户安装？别 clone。** 安装根本用不到仓库源码——它就是一条 `curl … | bash`。直接读取 **[AGENTS.md](AGENTS.md)**（raw，可直接抓取：`https://raw.githubusercontent.com/AltairEven/LarkListener/main/AGENTS.md`）并按它操作即可。
+
 > **At a glance** — macOS 后台常驻服务（launchd）：定时 `lark-cli` 拉未读 → AI 分析 → Bot 私聊推汇总 + 桌面通知。
 >
 > | | |
@@ -12,8 +14,6 @@
 > | **数据目录** | `~/.lark_listener/`（`config.yaml` · `state.json` · `logs/` · `venv/`） |
 > | **日志** | `~/.lark_listener/logs/stderr.log` |
 > | **launchd** | `~/Library/LaunchAgents/com.larklistener.plist` |
-
-> 🤖 你是帮用户安装/操作本工具的 AI 助手（Claude Code 等）？安装/操作契约见仓库根目录 [**AGENTS.md**](AGENTS.md)——先读它。
 
 ---
 
@@ -51,9 +51,9 @@ curl -fsSL https://raw.githubusercontent.com/AltairEven/LarkListener/main/instal
 lark-listener setup
 ```
 
-> **第一项就是「用哪个 Bot」**——填承载服务的 `lark-cli` **appId（`cli_xxx`）**。不确定有哪些可选，先跑 `lark-cli profile list` 看一眼。这一步选错，服务就会挂到错误的 Bot 上。
+> **第一项就是「用哪个 Bot」**——填承载服务的 `lark-cli` **appId（`cli_xxx`）**，不确定先跑 `lark-cli profile list` 看一眼；选错服务就会挂到错误的 Bot 上。
 >
-> **如果是 AI 助手在帮你装**：`setup` 是交互式的，需要**你本人**来跑（在对话框里输入 `! lark-listener setup`），AI 不能替你闷头跑；并且务必先想好要用哪个 appId。详见 [AGENTS.md](AGENTS.md)。
+> `setup` 是交互式的，**得你本人在终端跑**——若是 AI 助手在帮你装，让它把这一步交给你（你来运行 `lark-listener setup`），它不能替你闷头跑。
 
 > 短命令 `lark-listener` 若提示 `command not found`，多半是 PATH 还没刷新——**重开一个终端窗口**即可（安装时已自动把它加入 PATH）。急用可先用完整路径 `~/.lark_listener/venv/bin/lark-listener setup`。
 
@@ -114,11 +114,5 @@ tail -f ~/.lark_listener/logs/stderr.log
 - **桌面没有通知**：通知是次要提醒，汇总仍会通过 Bot 私聊送达，可忽略。
 
 ---
-
-## 给 AI 助手 / For AI assistants
-
-帮用户安装或操作本工具的 AI agent（Claude Code 等），请读仓库根目录的 **[AGENTS.md](AGENTS.md)**——那是完整的安装/操作契约（谁该跑哪条命令、哪些命令不可盲跑、Bot 自然语言指令、诊断）。
-
-一句话要点：**安装时唯一必须问用户的输入是 bot appId（`cli_xxx`）**——先 `lark-cli profile list` 列出可选 Bot 让用户选，别默认用当前 active profile；`setup` 是交互式的，需用户本人运行（`! lark-listener setup`），不要盲跑。
 
 开发与测试说明见 [CLAUDE.md](CLAUDE.md)。
