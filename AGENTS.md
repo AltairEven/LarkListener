@@ -1,0 +1,74 @@
+# AGENTS.md — LarkListener 安装/操作契约（给 AI agent）
+
+This file is for AI coding agents (Claude Code, etc.) installing or operating
+LarkListener on a user's machine. **Read it before running anything.** Human guide: [README.md](README.md).
+
+## What it is
+
+macOS-only background service (launchd): periodically pulls the user's Feishu/Lark
+unread messages via `lark-cli` → AI summarises → the bot DMs a digest + a desktop
+notification. Runtime deps: Python ≥ 3.9, `lark-cli` (Node.js), one AI backend
+(Claude / OpenAI-compatible / local ollama).
+
+## ⚠️ The one input you MUST get from the user: the bot appId
+
+LarkListener runs **as a specific Lark bot**. Before configuring, you MUST confirm
+**which bot — the `lark-cli` appId, `cli_xxx` — carries the service.** Do **not**
+silently assume the currently-active `lark-cli` profile is the right one; ask.
+
+- Enumerate the available bots: `lark-cli profile list` (JSON with `appId` / `user` / `brand`).
+- Show them to the user and have them choose the appId. This is the single most
+  important decision in setup — getting it wrong points the service at the wrong bot.
+
+## Install contract — who runs what
+
+| Step | Command | Who runs it |
+|---|---|---|
+| 1. Prereqs | `lark-cli` installed + logged in with `--scope search:message` | user (you can verify via `lark-cli profile list`) |
+| 2. Install | `curl -fsSL https://raw.githubusercontent.com/AltairEven/LarkListener/main/install.sh \| bash` | **you** (non-interactive) |
+| 3. Configure | `lark-listener setup` | **the USER** — interactive (see below) |
+| 4. Start | `lark-listener start` | **you** (non-interactive) |
+| 5. Use | message the bot 「汇总」 in Feishu | user |
+
+## 🚫 Do NOT run these unattended
+
+`setup`, `uninstall`, `config` block on stdin or open a GUI — running them through
+your Bash tool will hang or hit EOF and leave a half-configured install.
+
+- **`lark-listener setup`** — interactive wizard. **Hand it to the user**: tell them
+  to run `! lark-listener setup` so it runs in their own session. Before they do,
+  make sure they have ready: **the bot appId (`cli_xxx`, see above — emphasise this)**,
+  their AI backend + model + API key. Prompts, in order:
+  1. **bot appId (`cli_xxx`)** ← the critical one
+  2. poll interval (sec, default 300)
+  3. keywords (comma-separated, optional)
+  4. AI backend: `1) openai  2) claude  3) ollama`
+  5. model name
+  6. API key (blank for ollama)
+  7. API base URL (blank = default)
+  8. user_id / bot_chat_id — auto-derived via `lark-cli` (no need to ask the user)
+  9. authorise `search:message` — opens a browser
+- **`lark-listener uninstall`** — prompts `确认卸载？(y/N)`.
+- **`lark-listener config`** — opens a GUI editor; edit `~/.lark_listener/config.yaml` directly instead.
+
+## ✅ Safe for you to run
+
+- `lark-listener status` — diagnostics: service state + main/listener PIDs + every
+  file location. **Start here when something is wrong.**
+- `lark-listener start` / `stop` / `restart` — non-interactive service control.
+- `lark-cli profile list` — enumerate available bots.
+- `tail -n 100 ~/.lark_listener/logs/stderr.log` — logs (most failures leave a trace).
+
+## Operating it (chat, not shell)
+
+Daily use is **natural-language messages sent to the bot inside Feishu** — these are
+not shell commands: 「汇总」/「总结」/`summary`, 「汇总最近2小时」, 「当前配置」, 「帮助」,
+「轮询间隔改成10分钟」, 「关注关键词 上线」 / 「不要关注 故障」 (reply 「确认」 to apply).
+`ai` / `notify` / `lark_cli_appid` are protected — change them by editing the file,
+not over chat; config edits take effect on the next poll (no restart). Restart is
+only needed after a code upgrade.
+
+## Paths
+
+- `~/.lark_listener/` — `config.yaml` · `state.json` · `logs/` · `venv/`
+- `~/Library/LaunchAgents/com.larklistener.plist` — launchd config

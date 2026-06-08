@@ -51,6 +51,10 @@ curl -fsSL https://raw.githubusercontent.com/AltairEven/LarkListener/main/instal
 lark-listener setup
 ```
 
+> **第一项就是「用哪个 Bot」**——填承载服务的 `lark-cli` **appId（`cli_xxx`）**。不确定有哪些可选，先跑 `lark-cli profile list` 看一眼。这一步选错，服务就会挂到错误的 Bot 上。
+>
+> **如果是 AI 助手在帮你装**：`setup` 是交互式的，需要**你本人**来跑（在对话框里输入 `! lark-listener setup`），AI 不能替你闷头跑；并且务必先想好要用哪个 appId。详见 [AGENTS.md](AGENTS.md)。
+
 > 短命令 `lark-listener` 若提示 `command not found`，多半是 PATH 还没刷新——**重开一个终端窗口**即可（安装时已自动把它加入 PATH）。急用可先用完整路径 `~/.lark_listener/venv/bin/lark-listener setup`。
 
 最后启动服务：
@@ -115,6 +119,10 @@ tail -f ~/.lark_listener/logs/stderr.log
 
 If you're an AI agent (Claude Code, etc.) helping a user install or operate LarkListener, read this section first. It states what's safe to run yourself, what needs the human, and the exact contract of each surface.
 
+> **📋 Canonical agent contract: [AGENTS.md](AGENTS.md)** — read it before running anything.
+>
+> **The one input you must get from the user: the bot appId (`cli_xxx`).** LarkListener runs *as* a specific Lark bot. Confirm which one with `lark-cli profile list`, then have the user pick — don't assume the active profile. Getting this wrong points the service at the wrong bot.
+
 ### Two interaction surfaces — don't conflate them
 
 - **CLI** — `lark-listener <command>` in a terminal. Used to **install and manage the service**.
@@ -124,8 +132,8 @@ If you're an AI agent (Claude Code, etc.) helping a user install or operate Lark
 
 These block on stdin / open a GUI and will hang or stall a non-interactive shell. Hand them to the user (e.g. suggest they type `! lark-listener setup` so it runs in their session):
 
-- **`lark-listener setup`** — interactive wizard. For a fresh config it prompts, in order:
-  1. Bot 选择：检测到 active bot 时问 `使用它？(Y/n)`，否则要求输入 `appId`（`cli_xxx`）
+- **`lark-listener setup`** — interactive wizard; **have the user run it** (`! lark-listener setup`). Make sure they know **which bot appId (`cli_xxx`)** to use first — run `lark-cli profile list` and let them pick. For a fresh config it prompts, in order:
+  1. **Bot appId（`cli_xxx`）← 最关键**：检测到 active bot 时问 `使用它？(Y/n)`，否则要求输入 appId。**不要默认就用 active 的，先和用户确认。**
   2. `轮询间隔（秒，默认 300）`
   3. `关注的关键词（逗号分隔，可空）`
   4. AI 后端 `1) openai  2) claude  3) ollama`（默认 1）
