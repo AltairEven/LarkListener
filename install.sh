@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="https://github.com/AltairEven/LarkListener.git"
 VENV="$HOME/.lark_listener/venv"
-SHIM="$HOME/.local/bin/lark-listener"
+SHIM_RECORD="$HOME/.lark_listener/shim_link"   # 记录软链实际位置，供 uninstall 精确清理
 
 echo "=== LarkListener 安装 ==="
 
@@ -50,26 +50,50 @@ fi
 "$VENV/bin/pip" install --upgrade pip >/dev/null
 "$VENV/bin/pip" install --force-reinstall "git+$REPO"
 
-# 6) 软链短命令到 ~/.local/bin（best-effort：失败不影响安装，仍可用 venv 绝对路径）
-#    plist 另指向 venv 内真实入口，软链仅为短命令便利。
-SHIM_OK=false
-if mkdir -p "$HOME/.local/bin" 2>/dev/null && ln -sf "$VENV/bin/lark-listener" "$SHIM" 2>/dev/null; then
-    SHIM_OK=true
-    echo "✓ 已安装，短命令软链：$SHIM"
-else
-    echo "⚠️  无法在 ~/.local/bin 创建短命令软链（目录不可写）——不影响使用，用绝对路径即可。"
+# 6) 软链短命令（ensurepath 式，best-effort）。plist 另指向 venv 真实入口，软链仅为便利。
+#    优先「可写 且 已在 PATH」的目录（免改 shell 配置，brew 用户开箱即用）；
+#    否则用 ~/.local/bin 并把它幂等加入 PATH。
+SHIM_DIR=""; IN_PATH=false
+for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+    if [ -d "$d" ] && [ -w "$d" ] && case ":$PATH:" in *":$d:"*) true ;; *) false ;; esac; then
+        SHIM_DIR="$d"; IN_PATH=true; break
+    fi
+done
+if [ -z "$SHIM_DIR" ] && mkdir -p "$HOME/.local/bin" 2>/dev/null && [ -w "$HOME/.local/bin" ]; then
+    SHIM_DIR="$HOME/.local/bin"
+    case ":$PATH:" in *":$HOME/.local/bin:"*) IN_PATH=true ;; *) IN_PATH=false ;; esac
 fi
 
-# 7) 结尾：提示手动跑 setup（始终给一定可用的 venv 绝对路径）
+SHIM_OK=false; PATH_INJECTED=false; SHIM=""
+if [ -n "$SHIM_DIR" ] && ln -sf "$VENV/bin/lark-listener" "$SHIM_DIR/lark-listener" 2>/dev/null; then
+    SHIM_OK=true; SHIM="$SHIM_DIR/lark-listener"
+    printf '%s\n' "$SHIM" > "$SHIM_RECORD" 2>/dev/null || true   # 记录位置供 uninstall
+    echo "✓ 短命令软链：$SHIM"
+fi
+
+# 6b) 软链目录不在 PATH → 幂等注入用户 shell 配置
+if $SHIM_OK && ! $IN_PATH; then
+    case "$(basename "${SHELL:-zsh}")" in
+        bash) RC="$HOME/.bash_profile" ;;
+        zsh)  RC="$HOME/.zshrc" ;;
+        *)    RC="$HOME/.profile" ;;
+    esac
+    if [ -f "$RC" ] && grep -qF "$SHIM_DIR" "$RC" 2>/dev/null; then
+        PATH_INJECTED=true   # 已注入过
+    elif printf '\n# Added by LarkListener installer\nexport PATH="%s:$PATH"\n' "$SHIM_DIR" >> "$RC" 2>/dev/null; then
+        PATH_INJECTED=true
+    fi
+fi
+
+# 7) 结尾：始终给一定可用的 venv 绝对路径，并按软链情况提示短命令
 echo ""
 echo "✅ 安装完成。现在运行配置向导："
-if $SHIM_OK; then
+if $SHIM_OK && $IN_PATH; then
     echo "   lark-listener setup"
-    echo "   （若提示 command not found，说明 ~/.local/bin 不在 PATH，请改用：$VENV/bin/lark-listener setup）"
+elif $SHIM_OK && $PATH_INJECTED; then
+    echo "   lark-listener setup        # 已把 $SHIM_DIR 加入 PATH，请【重开终端】后生效"
+    echo "   （本终端想立即用，则跑：$VENV/bin/lark-listener setup）"
 else
     echo "   $VENV/bin/lark-listener setup"
-    echo ""
-    echo "   想用短命令 lark-listener？修复 ~/.local/bin 写权限后重建软链："
-    echo "     sudo chown \$(whoami) ~/.local/bin"
-    echo "     ln -sf $VENV/bin/lark-listener ~/.local/bin/lark-listener"
+    echo "   （未能创建短命令软链；用上面绝对路径即可。日常使用是在飞书跟 Bot 聊天，不受影响。）"
 fi

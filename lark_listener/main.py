@@ -391,10 +391,32 @@ def run():
 
 def main():
     ensure_path()
-    parser = argparse.ArgumentParser(prog="lark-listener")
-    sub = parser.add_subparsers(dest="command")
-    for name in ("run", "setup", "start", "stop", "restart", "status", "config", "uninstall"):
-        sub.add_parser(name)
+    parser = argparse.ArgumentParser(
+        prog="lark-listener",
+        description="飞书消息汇总后台服务：定时拉取未读消息 → AI 分析 → Bot 私聊推送汇总 + macOS 通知。",
+        epilog=(
+            "日常使用（核心）：给 LarkListener Bot 发「汇总」/「总结」立即汇总一次；\n"
+            "发「帮助」查看用法、或用自然语言改配置（如「轮询间隔改成10分钟」「关注关键词 上线」）。\n"
+            "\n"
+            "配置文件：~/.lark_listener/config.yaml（或运行 `lark-listener config` 打开）。\n"
+            "日志：    ~/.lark_listener/logs/stderr.log\n"
+            "首次安装后请先运行 `lark-listener setup`。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+    _CMDS = {
+        "run": "运行守护循环（launchd 调用，一般无需手动跑）",
+        "setup": "交互安装向导：选 Bot、配置轮询/关键词/AI、写 launchd、引导授权",
+        "start": "启动后台服务",
+        "stop": "停止后台服务",
+        "restart": "重启服务（升级或改代码后需要）",
+        "status": "查看服务运行状态",
+        "config": "打开配置文件进行编辑",
+        "uninstall": "停止服务并删除全部配置与数据",
+    }
+    for name, help_text in _CMDS.items():
+        sub.add_parser(name, help=help_text, description=help_text)
     args = parser.parse_args()
 
     if args.command == "run":
