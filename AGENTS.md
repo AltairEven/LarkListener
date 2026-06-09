@@ -71,6 +71,9 @@ your Bash tool will hang or hit EOF and leave a half-configured install.
   **Start here when something is wrong.** Exit 0 = all pass, 1 = has a fail.
 - `lark-listener status [--json]` — service state + main/listener PIDs + file
   locations + last poll. Exit 0 running / 3 stopped / 4 not installed.
+- `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — on-demand
+  summary of a time window to stdout (Unix-second timestamps; default also pushes
+  the Feishu DM, `--quiet` returns stdout only). Read-only; safe alongside the daemon.
 - `lark-listener config get [KEY] [--json]` — view config (api_key masked).
 - `lark-listener config set KEY VALUE [--add|--remove] [--force]` — non-interactive
   edit; dotted paths (`poll_interval`, `keywords`, `ai.model`, …); protected keys

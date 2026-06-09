@@ -20,6 +20,7 @@ lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上
 ## ✅ 可直接（非交互）运行
 - `lark-listener start | stop | restart` — 服务控制
 - `lark-listener status [--json]` / `lark-listener doctor [--json] [--deep]`
+- `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — 按需汇总某时间窗到 stdout（Unix 秒时间戳；默认也推飞书，`--quiet` 只回 stdout）
 - `lark-listener config get [KEY] [--json]` — 查看配置（api_key 已脱敏）
 - `lark-listener config set KEY VALUE [--add|--remove] [--force]` — 改配置，下次轮询生效（不重启）
   - 点号路径：`poll_interval`、`keywords`、`ai.model`、`notify.user_id`、`lark_cli_appid` 等
