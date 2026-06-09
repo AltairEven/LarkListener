@@ -88,3 +88,50 @@ def test_check_recent_errors(tmp_path):
     log.write_text("all good\n")
     assert doctor.check_recent_errors(log).status == "ok"
     assert doctor.check_recent_errors(tmp_path / "none.log").status == "ok"
+
+
+def test_run_doctor_aggregates_and_exit(monkeypatch):
+    monkeypatch.setattr(doctor, "check_config", lambda: doctor.Check("config", "ok"))
+    monkeypatch.setattr(doctor, "check_service", lambda s: doctor.Check("service", "ok"))
+    monkeypatch.setattr(doctor, "check_lark_cli", lambda *a, **k: doctor.Check("lark_cli", "ok"))
+    monkeypatch.setattr(doctor, "check_last_poll", lambda *a, **k: doctor.Check("last_poll", "warn"))
+    monkeypatch.setattr(doctor, "check_recent_errors", lambda p: doctor.Check("recent_errors", "ok"))
+    monkeypatch.setattr(doctor, "check_ai_backend", lambda *a, **k: doctor.Check("ai_backend", "ok"))
+    monkeypatch.setattr(doctor.service, "collect_status", lambda: {"state": "running", "last_poll_time": None})
+    monkeypatch.setattr(doctor.config_mod, "load_config", lambda *a, **k: {"poll_interval": 300, "ai": {}})
+    checks, code = doctor.run_doctor()
+    assert code == 0  # 只有 warn，无 fail
+    assert any(c.check == "ai_backend" for c in checks)
+
+
+def test_run_doctor_fail_exit_1(monkeypatch):
+    monkeypatch.setattr(doctor, "check_config", lambda: doctor.Check("config", "fail", "x"))
+    monkeypatch.setattr(doctor, "check_service", lambda s: doctor.Check("service", "ok"))
+    monkeypatch.setattr(doctor, "check_lark_cli", lambda *a, **k: doctor.Check("lark_cli", "ok"))
+    monkeypatch.setattr(doctor, "check_last_poll", lambda *a, **k: doctor.Check("last_poll", "ok"))
+    monkeypatch.setattr(doctor, "check_recent_errors", lambda p: doctor.Check("recent_errors", "ok"))
+    monkeypatch.setattr(doctor, "check_ai_backend", lambda *a, **k: doctor.Check("ai_backend", "ok"))
+    monkeypatch.setattr(doctor.service, "collect_status", lambda: {"state": "running", "last_poll_time": None})
+    monkeypatch.setattr(doctor.config_mod, "load_config", lambda *a, **k: {"poll_interval": 300, "ai": {}})
+    _, code = doctor.run_doctor()
+    assert code == 1
+
+
+def test_check_ai_backend_deep_paths(monkeypatch):
+    monkeypatch.setattr(doctor, "_sdk_installed", lambda name: True)
+    cfg = {"ai": {"provider": "claude", "model": "m", "api_key": "k", "base_url": ""}}
+    monkeypatch.setattr(doctor, "_deep_probe", lambda *a, **k: (True, ""))
+    assert doctor.check_ai_backend(cfg, deep=True).status == "ok"
+    monkeypatch.setattr(doctor, "_deep_probe", lambda *a, **k: (False, "boom"))
+    c = doctor.check_ai_backend(cfg, deep=True)
+    assert c.status == "fail" and "boom" in c.detail
+
+
+def test_cmd_doctor_json(monkeypatch, capsys):
+    monkeypatch.setattr(doctor, "run_doctor",
+                        lambda deep=False: ([doctor.Check("config", "ok", "fine")], 0))
+    code = doctor.cmd_doctor(as_json=True)
+    import json as _j
+    data = _j.loads(capsys.readouterr().out)
+    assert data[0]["check"] == "config" and data[0]["status"] == "ok"
+    assert code == 0

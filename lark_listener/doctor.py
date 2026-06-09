@@ -99,7 +99,7 @@ def check_recent_errors(log_path: Path) -> Check:
         return Check("recent_errors", "ok", f"日志读取跳过：{e}")
 
 
-def check_ai_backend(config: dict, deep: bool = False, run=None) -> Check:
+def check_ai_backend(config: dict, deep: bool = False) -> Check:
     ai = config.get("ai") or {}
     provider = ai.get("provider")
     model = ai.get("model")
@@ -125,7 +125,7 @@ def check_ai_backend(config: dict, deep: bool = False, run=None) -> Check:
     if not deep:
         return Check("ai_backend", "ok", f"{provider}/{model} 配置完整（未做真实请求，--deep 可验证）")
 
-    ok, detail = _deep_probe(provider, model, api_key, base_url, run)
+    ok, detail = _deep_probe(provider, model, api_key, base_url)
     if ok:
         return Check("ai_backend", "ok", f"{provider}/{model} 真实请求成功")
     return Check("ai_backend", "fail", f"真实请求失败：{detail}",
@@ -137,6 +137,71 @@ def check_ai_backend(config: dict, deep: bool = False, run=None) -> Check:
 # 不需要，而「是否第三方兼容端点」无法可靠从 model 名推断；端点错误由 --deep 兜底。
 
 
-def _deep_probe(provider, model, api_key, base_url, run=None):
-    """真实最小请求探测，返回 (ok, detail)。Task 5 完善。"""
-    return False, "未实现"
+def _deep_probe(provider, model, api_key, base_url):
+    """真实最小请求探测，返回 (ok, detail)。best-effort，异常即视为失败。"""
+    try:
+        if provider == "claude":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key, timeout=30)
+            client.messages.create(model=model, max_tokens=1,
+                                    messages=[{"role": "user", "content": "ping"}])
+            return True, ""
+        if provider == "openai":
+            import openai
+            client = openai.OpenAI(api_key=api_key, base_url=base_url or None, timeout=30)
+            client.models.list()
+            return True, ""
+        if provider == "ollama":
+            import urllib.request
+            url = (base_url or "http://localhost:11434").rstrip("/") + "/api/tags"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                resp.read()
+            return True, ""
+        return False, f"未知 provider {provider}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def run_doctor(deep: bool = False):
+    """跑全部检查，返回 (checks, exit_code)。exit_code: 有 fail=1 否则 0。"""
+    status = service.collect_status()
+    try:
+        config = config_mod.load_config()
+    except Exception:
+        config = {}
+    poll_interval = config.get("poll_interval", 300) if isinstance(config, dict) else 300
+    log_path = service.LISTENER_HOME / "logs" / "stderr.log"
+
+    checks = [
+        check_config(),
+        check_service(status),
+        check_lark_cli(),
+        check_last_poll(status, poll_interval),
+        check_recent_errors(log_path),
+        check_ai_backend(config if isinstance(config, dict) else {}, deep=deep),
+    ]
+    code = 1 if any(c.status == "fail" for c in checks) else 0
+    return checks, code
+
+
+_ICON = {"ok": "✓", "warn": "⚠", "fail": "✗"}
+
+
+def _render_doctor_text(checks) -> None:
+    print("LarkListener 诊断：\n")
+    for c in checks:
+        print(f"  {_ICON.get(c.status, '?')} [{c.check}] {c.detail}")
+        if c.fix and c.status != "ok":
+            print(f"      → 修复：{c.fix}")
+    fails = [c for c in checks if c.status == "fail"]
+    print(f"\n{'有问题需处理' if fails else '总体正常'}（fail={len(fails)}）")
+
+
+def cmd_doctor(as_json: bool = False, deep: bool = False) -> int:
+    checks, code = run_doctor(deep=deep)
+    if as_json:
+        import json
+        print(json.dumps([asdict(c) for c in checks], ensure_ascii=False, indent=2))
+    else:
+        _render_doctor_text(checks)
+    return code
