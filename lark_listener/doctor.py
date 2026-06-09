@@ -74,8 +74,8 @@ def check_last_poll(status: dict, poll_interval: int, now: Optional[datetime] = 
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=TZ)
-    except ValueError:
-        return Check("last_poll", "warn", f"无法解析 last_poll_time：{raw}")
+    except (ValueError, TypeError):
+        return Check("last_poll", "warn", f"无法解析 last_poll_time：{raw!r}")
     age = (now - dt).total_seconds()
     if age > poll_interval * 3:
         return Check("last_poll", "warn",

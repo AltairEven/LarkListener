@@ -135,3 +135,9 @@ def test_cmd_doctor_json(monkeypatch, capsys):
     data = _j.loads(capsys.readouterr().out)
     assert data[0]["check"] == "config" and data[0]["status"] == "ok"
     assert code == 0
+
+
+def test_check_last_poll_non_string_does_not_crash():
+    # 损坏的 state.json：last_poll_time 是数字而非字符串 → 不应抛 TypeError
+    c = doctor.check_last_poll({"last_poll_time": 12345}, 300)
+    assert c.status == "warn"

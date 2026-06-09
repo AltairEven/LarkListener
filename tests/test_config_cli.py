@@ -140,3 +140,14 @@ def test_config_set_keywords_empty_clears(tmp_path):
     p = _write_cfg(tmp_path)
     assert config_cli.config_set("keywords", "", path=p) == 0
     assert config_cli.config_mod.load_config(str(p))["keywords"] == []
+
+
+def test_config_set_api_key_not_echoed(tmp_path, capsys):
+    p = _write_cfg(tmp_path)  # 该 fixture 的 api_key 值为 'secret'
+    assert config_cli.config_set("ai.api_key", "supersecret", force=True, path=p) == 0
+    out = capsys.readouterr().out
+    assert "supersecret" not in out   # 新值不回显
+    assert "secret" not in out        # 旧值（'secret'）也不回显
+    assert "已隐藏" in out
+    # 但确实写进了文件
+    assert config_cli.config_mod.load_config(str(p))["ai"]["api_key"] == "supersecret"

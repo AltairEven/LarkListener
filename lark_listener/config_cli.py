@@ -130,5 +130,9 @@ def config_set(key: str, value: str, add: bool = False, remove: bool = False,
         print(f"❌ 校验失败，已回滚：{e}")
         return 1
 
-    print(f"✓ {key}: {old!r} → {new_value!r}（下次轮询生效）")
+    if leaf == "api_key":
+        # 与 config_get 的脱敏一致：绝不把密钥明文回显到终端 / AI transcript
+        print(f"✓ {key}: 已更新（值已隐藏，下次轮询生效）")
+    else:
+        print(f"✓ {key}: {old!r} → {new_value!r}（下次轮询生效）")
     return 0
