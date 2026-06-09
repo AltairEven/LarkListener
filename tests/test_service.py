@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -275,3 +276,50 @@ def test_collect_status_running_reads_last_poll(tmp_path, monkeypatch):
     assert st["state"] == "running"
     assert st["main_pids"] == ["123"]
     assert st["last_poll_time"] == "2026-06-09T10:00:00+08:00"
+
+
+def test_cmd_status_exit_codes(monkeypatch, capsys):
+    monkeypatch.setattr(service, "collect_status",
+                        lambda: {"state": "running", "main_pids": ["1"], "event_pids": [],
+                                 "files": {}, "last_poll_time": None})
+    assert service.cmd_status() == 0
+    monkeypatch.setattr(service, "collect_status",
+                        lambda: {"state": "stopped", "main_pids": [], "event_pids": [],
+                                 "files": {}, "last_poll_time": None})
+    assert service.cmd_status() == 3
+    monkeypatch.setattr(service, "collect_status",
+                        lambda: {"state": "not_installed", "main_pids": [], "event_pids": [],
+                                 "files": {}, "last_poll_time": None})
+    assert service.cmd_status() == 4
+
+
+def test_cmd_status_json_output(monkeypatch, capsys):
+    monkeypatch.setattr(service, "collect_status",
+                        lambda: {"state": "running", "main_pids": ["7"], "event_pids": [],
+                                 "files": {}, "last_poll_time": "2026-06-09T10:00:00+08:00"})
+    code = service.cmd_status(as_json=True)
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["state"] == "running" and data["main_pids"] == ["7"]
+    assert code == 0
+
+
+def test_cmd_status_collect_failure_returns_1(monkeypatch):
+    def boom():
+        raise RuntimeError("x")
+    monkeypatch.setattr(service, "collect_status", boom)
+    assert service.cmd_status() == 1
+
+
+def test_render_status_text_content(capsys):
+    st = {"state": "running", "main_pids": ["7"], "event_pids": ["8"],
+          "files": {"config": {"path": "/h/config.yaml", "exists": True},
+                    "logs": {"path": "/h/logs", "exists": True}},
+          "last_poll_time": "2026-06-09T10:00:00+08:00"}
+    service._render_status_text(st)
+    out = capsys.readouterr().out
+    assert "● 服务运行中" in out
+    assert "7" in out and "8" in out
+    assert "/h/config.yaml" in out
+    assert "/h/logs/" in out          # 目录尾部斜杠
+    assert "上次轮询：2026-06-09T10:00:00+08:00" in out

@@ -254,34 +254,41 @@ def collect_status() -> dict:
     }
 
 
-def cmd_status() -> None:
-    if not PLIST_PATH.exists():
-        print("◇ 未安装")
-    elif _is_running():
-        print("● 服务运行中")
-    else:
-        print("○ 服务已安装，未运行")
+_STATUS_EXIT = {"running": 0, "stopped": 3, "not_installed": 4}
 
-    main_pids = _pids(f"{VENV_DIR}/bin/lark-listener run")
-    event_pids = _pids("lark-cli event.*--as bot")
+
+def _render_status_text(st: dict) -> None:
+    label = {"running": "● 服务运行中", "stopped": "○ 服务已安装，未运行",
+             "not_installed": "◇ 未安装"}
+    print(label.get(st["state"], st["state"]))
     print("\n进程：")
-    print(f"  主进程 (lark-listener run)  : {' '.join(main_pids) or '无'}")
-    print(f"  监听子进程 (lark-cli event) : {' '.join(event_pids) or '无'}")
-
-    def mark(p: Path) -> str:
-        return "✓" if (p.exists() or p.is_symlink()) else "—"
-
-    shim = _recorded_shim()
+    print(f"  主进程 (lark-listener run)  : {' '.join(st['main_pids']) or '无'}")
+    print(f"  监听子进程 (lark-cli event) : {' '.join(st['event_pids']) or '无'}")
     print("\n文件位置：")
-    print(f"  配置     {mark(LISTENER_HOME / 'config.yaml')} {LISTENER_HOME / 'config.yaml'}")
-    print(f"  状态     {mark(LISTENER_HOME / 'state.json')} {LISTENER_HOME / 'state.json'}")
-    print(f"  日志     {mark(LISTENER_HOME / 'logs')} {LISTENER_HOME / 'logs'}/")
-    print(f"  venv     {mark(VENV_DIR)} {VENV_DIR}")
-    print(f"  launchd  {mark(PLIST_PATH)} {PLIST_PATH}")
-    if shim:
-        print(f"  短命令   {mark(Path(shim))} {shim}")
+    rows = [("config", "配置     "), ("state", "状态     "), ("logs", "日志     "),
+            ("venv", "venv     "), ("launchd", "launchd  "), ("shim", "短命令   ")]
+    for key, label_txt in rows:
+        info = st["files"].get(key)
+        if not info:
+            continue
+        mark = "✓" if info["exists"] else "—"
+        path = info["path"] + ("/" if key == "logs" else "")
+        print(f"  {label_txt}{mark} {path}")
+    if st["last_poll_time"]:
+        print(f"\n上次轮询：{st['last_poll_time']}")
+
+
+def cmd_status(as_json: bool = False) -> int:
+    try:
+        st = collect_status()
+    except Exception as e:  # noqa: BLE001 — 诊断命令本身不可崩
+        print(f"❌ 状态获取失败：{e}")
+        return 1
+    if as_json:
+        print(json.dumps(st, ensure_ascii=False, indent=2))
     else:
-        print(f"  短命令   {mark(SHIM_LINK)} {SHIM_LINK}（默认位置）")
+        _render_status_text(st)
+    return _STATUS_EXIT.get(st["state"], 1)
 
 
 def cmd_config() -> None:
