@@ -1,6 +1,7 @@
 import os
 import tempfile
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock
 from lark_listener.main import poll_once
 from lark_listener.fetcher import MessageCategory
@@ -542,3 +543,135 @@ def test_main_agent_skills_uninstall_dispatch(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         main_mod.main()
     assert ei.value.code == 0 and seen["u"] is True
+
+
+@patch("lark_listener.main.Fetcher")
+def test_fetch_window_returns_categorized_and_fetcher(MockFetcher):
+    fetcher = MockFetcher.return_value
+    fetcher.fetch.return_value = {"cat": [{"message_id": "m1"}]}
+    config = {"keywords": ["k"], "include_at_all": True, "exclude_chat_ids": ["oc_x"]}
+    start = datetime(2026, 6, 9, 10, 0, tzinfo=main_mod.TZ)
+    end = datetime(2026, 6, 9, 11, 0, tzinfo=main_mod.TZ)
+    categorized, returned = main_mod._fetch_window(config, start, end, set())
+    assert categorized == {"cat": [{"message_id": "m1"}]}
+    assert returned is fetcher
+    fetcher.fetch.assert_called_once_with(
+        start, end, processed_ids=set(), exclude_chat_ids={"oc_x"})
+
+
+@patch("lark_listener.main.Analyzer")
+def test_analyze_window_returns_analysis(MockAnalyzer):
+    fetcher = MagicMock()
+    MockAnalyzer.return_value.analyze.return_value = {"oc": "analysis"}
+    config = {"context_messages": 0, "keywords": [],
+              "ai": {"provider": "claude", "model": "m", "api_key": "k", "base_url": ""}}
+    start = datetime(2026, 6, 9, 10, 0, tzinfo=main_mod.TZ)
+    end = datetime(2026, 6, 9, 11, 0, tzinfo=main_mod.TZ)
+    analysis = main_mod._analyze_window(
+        config, fetcher, {"cat": [{"message_id": "m1"}]}, start, end, "ou")
+    assert analysis == {"oc": "analysis"}
+    MockAnalyzer.return_value.analyze.assert_called_once()
+    fetcher.fetch_context.assert_not_called()
+
+
+def test_cmd_summarize_start_after_end_errors():
+    assert main_mod.cmd_summarize(2000, 1000) == 1
+    assert main_mod.cmd_summarize(1000, 1000) == 1
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_default_pushes_feishu_and_stdout(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=False)
+    out = capsys.readouterr().out
+    assert "汇总ABC" in out
+    MockNotifier.return_value.notify.assert_called_once()
+    args = mock_fw.call_args.args
+    assert args[1] == datetime.fromtimestamp(1000, main_mod.TZ)
+    assert args[2] == datetime.fromtimestamp(2000, main_mod.TZ)
+    assert code == 0
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_quiet_skips_feishu(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=True)
+    assert "汇总ABC" in capsys.readouterr().out
+    MockNotifier.return_value.notify.assert_not_called()
+    assert code == 0
+
+
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_no_messages(mock_cfg, mock_prof, mock_fw, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000)
+    assert "没有新消息" in capsys.readouterr().out
+    assert code == 0
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_empty_text_no_push(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=False)
+    assert "没有可汇总的内容" in capsys.readouterr().out
+    MockNotifier.return_value.notify.assert_not_called()
+    assert code == 0
+
+
+def test_main_summarize_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["lark-listener", "summarize", "--start", "1000", "--end", "2000", "--quiet"])
+    seen = {}
+    monkeypatch.setattr(main_mod, "cmd_summarize",
+                        lambda start_ts, end_ts, quiet=False: seen.update(
+                            start=start_ts, end=end_ts, quiet=quiet) or 0)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
+    assert seen == {"start": 1000, "end": 2000, "quiet": True}
+
+
+def test_main_summarize_requires_start_end(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "summarize"])
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 2  # argparse usage error: missing required --start/--end
+
+
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_out_of_range_timestamp(mock_cfg, mock_prof, capsys):
+    # AI agent 误传毫秒时间戳 → 应友好报错而非 traceback
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    code = main_mod.cmd_summarize(1_000_000, 1_717_900_000_000)
+    assert code == 1
+    assert "时间戳无效" in capsys.readouterr().out

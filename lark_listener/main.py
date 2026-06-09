@@ -18,7 +18,7 @@ from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
-from lark_listener.notifier import Notifier
+from lark_listener.notifier import Notifier, build_summary_text
 from lark_listener.state import State
 
 TZ = timezone(timedelta(hours=8))
@@ -169,6 +169,42 @@ def _bot_listener():
             time.sleep(5)
 
 
+def _fetch_window(config, start, end, processed_ids):
+    """拉取 [start, end) 内的相关消息。返回 (categorized, fetcher)。
+    fetcher 一并返回，供 _analyze_window 取上下文（同一实例）。"""
+    exclude_ids = set(config.get("exclude_chat_ids", []))
+    fetcher = Fetcher(
+        keywords=config.get("keywords", []),
+        include_at_all=config.get("include_at_all", True),
+    )
+    categorized = fetcher.fetch(
+        start, end,
+        processed_ids=processed_ids,
+        exclude_chat_ids=exclude_ids or None,
+    )
+    return categorized, fetcher
+
+
+def _analyze_window(config, fetcher, categorized, start, end, my_user_id):
+    """取上下文 + 调 AI 分析。返回 analysis。"""
+    context = {}
+    context_limit = config.get("context_messages", 20)
+    if context_limit > 0:
+        context = fetcher.fetch_context(categorized, start, end, limit=context_limit)
+        ctx_total = sum(len(msgs) for msgs in context.values())
+        if ctx_total:
+            logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
+    ai_cfg = config["ai"]
+    analyzer = Analyzer(
+        provider=ai_cfg["provider"],
+        model=ai_cfg["model"],
+        api_key=ai_cfg.get("api_key", ""),
+        base_url=ai_cfg.get("base_url", ""),
+        keywords=config.get("keywords", []),
+    )
+    return analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
+
+
 def poll_once(
     config_path: Optional[str] = None,
     state_path: Optional[str] = None,
@@ -189,16 +225,8 @@ def poll_once(
     notify_cfg = config["notify"]
     my_user_id = notify_cfg["user_id"]
 
-    exclude_ids = set(config.get("exclude_chat_ids", []))
-    fetcher = Fetcher(
-        keywords=config.get("keywords", []),
-        include_at_all=config.get("include_at_all", True),
-    )
-    categorized = fetcher.fetch(
-        start, end,
-        processed_ids=set() if custom_start else state.processed_message_ids,
-        exclude_chat_ids=exclude_ids or None,
-    )
+    processed_ids = set() if custom_start else state.processed_message_ids
+    categorized, fetcher = _fetch_window(config, start, end, processed_ids)
 
     total = sum(len(msgs) for msgs in categorized.values())
     logger.info("Fetched %d new messages (from %s)", total, start.strftime("%m-%d %H:%M"))
@@ -211,31 +239,12 @@ def poll_once(
             state.save()
         return
 
-    # Manual trigger: report how many relevant messages were found and the
-    # rough AI analysis time, so the user knows how long to wait.
     if is_manual:
         est = estimate_ai_seconds(total)
         period = f"{start.strftime('%m-%d %H:%M')} ~ {end.strftime('%H:%M')}"
         _reply_bot(my_user_id, f"📊 {period} 找到 {total} 条相关消息，预计分析约 {format_duration(est)}")
 
-    # Fetch context messages for richer AI analysis
-    context_limit = config.get("context_messages", 20)
-    context = {}
-    if context_limit > 0:
-        context = fetcher.fetch_context(categorized, start, end, limit=context_limit)
-        ctx_total = sum(len(msgs) for msgs in context.values())
-        if ctx_total:
-            logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
-
-    ai_cfg = config["ai"]
-    analyzer = Analyzer(
-        provider=ai_cfg["provider"],
-        model=ai_cfg["model"],
-        api_key=ai_cfg.get("api_key", ""),
-        base_url=ai_cfg.get("base_url", ""),
-        keywords=config.get("keywords", []),
-    )
-    analysis = analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
+    analysis = _analyze_window(config, fetcher, categorized, start, end, my_user_id)
 
     notifier = Notifier(
         user_id=my_user_id,
@@ -259,6 +268,56 @@ def poll_once(
         state.save()
 
     logger.info("Summary sent successfully")
+
+
+def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
+    """按需汇总 [start_ts, end_ts]（Unix 秒）内的消息到 stdout。
+    默认也推飞书 DM + 桌面通知；--quiet 只回 stdout。只读，不碰 state。"""
+    if start_ts >= end_ts:
+        print("❌ --start 必须早于 --end")
+        return 1
+    try:
+        config = load_config()
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ 读取配置失败：{e}")
+        return 1
+    set_lark_profile(config.get("lark_cli_appid"))
+    try:
+        start = datetime.fromtimestamp(start_ts, TZ)
+        end = datetime.fromtimestamp(end_ts, TZ)
+    except (ValueError, OverflowError, OSError) as e:
+        print(f"❌ 时间戳无效（应为 Unix 秒，注意不是毫秒）：{e}")
+        return 1
+    period_s = start.strftime("%m-%d %H:%M")
+    period_e = end.strftime("%m-%d %H:%M")
+    my_user_id = config["notify"]["user_id"]
+
+    try:
+        categorized, fetcher = _fetch_window(config, start, end, set())
+        total = sum(len(msgs) for msgs in categorized.values())
+        if total == 0:
+            print(f"📭 {period_s} ~ {period_e} 期间没有新消息")
+            return 0
+        analysis = _analyze_window(config, fetcher, categorized, start, end, my_user_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ 汇总失败：{e}")
+        return 1
+
+    text = build_summary_text(categorized, analysis, period_s, period_e, my_user_id)
+    if not text:
+        print(f"📭 {period_s} ~ {period_e} 期间没有可汇总的内容")
+        return 0
+    print(text)
+
+    if not quiet:
+        try:
+            Notifier(
+                user_id=my_user_id,
+                bot_chat_id=config["notify"]["bot_chat_id"],
+            ).notify(categorized, analysis, period_s, period_e, my_user_id=my_user_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"（飞书推送失败，已忽略：{e}）")
+    return 0
 
 
 def _handle_message(content: str, sender_id: str, config_path: str, state_path: str,
@@ -433,7 +492,7 @@ def main():
         epilog=(
             "AI agent 操作入口：`lark-listener doctor --json`（自检）与 "
             "`lark-listener status --json`（状态）是排查起点。\n"
-            "✅ 可非交互运行：start/stop/restart/status/doctor/config get/config set/agent-skills。\n"
+            "✅ 可非交互运行：start/stop/restart/status/doctor/summarize/config get/config set/agent-skills。\n"
             "🚫 交互式·交给用户：setup、uninstall、config（无参开 GUI）。\n"
             "\n"
             "配置文件：~/.lark_listener/config.yaml；日志：~/.lark_listener/logs/stderr.log\n"
@@ -472,6 +531,11 @@ def main():
 
     p_as = sub.add_parser("agent-skills", help="✅ 安装/卸载 AI Agent 操作 skill")
     p_as.add_argument("op", choices=["install", "uninstall"])
+
+    p_sum = sub.add_parser("summarize", help="✅ 按需汇总指定时间窗的消息到 stdout（AI agent 用）")
+    p_sum.add_argument("--start", type=int, required=True, help="起始 Unix 时间戳（秒）")
+    p_sum.add_argument("--end", type=int, required=True, help="结束 Unix 时间戳（秒）")
+    p_sum.add_argument("--quiet", action="store_true", help="只回 stdout，不推飞书/桌面通知")
 
     sub.add_parser("uninstall", help="🚫 交互式·交给用户：卸载（二次确认）")
 
@@ -514,6 +578,8 @@ def main():
         if args.op == "install":
             sys.exit(agent_adapters.install_agent_skills())
         sys.exit(agent_adapters.uninstall_agent_skills())
+    if cmd == "summarize":
+        sys.exit(cmd_summarize(args.start, args.end, quiet=args.quiet))
 
     parser.print_help()
 
