@@ -1,6 +1,7 @@
 import os
 import tempfile
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock
 from lark_listener.main import poll_once
 from lark_listener.fetcher import MessageCategory
@@ -542,3 +543,32 @@ def test_main_agent_skills_uninstall_dispatch(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         main_mod.main()
     assert ei.value.code == 0 and seen["u"] is True
+
+
+@patch("lark_listener.main.Fetcher")
+def test_fetch_window_returns_categorized_and_fetcher(MockFetcher):
+    fetcher = MockFetcher.return_value
+    fetcher.fetch.return_value = {"cat": [{"message_id": "m1"}]}
+    config = {"keywords": ["k"], "include_at_all": True, "exclude_chat_ids": ["oc_x"]}
+    start = datetime(2026, 6, 9, 10, 0, tzinfo=main_mod.TZ)
+    end = datetime(2026, 6, 9, 11, 0, tzinfo=main_mod.TZ)
+    categorized, returned = main_mod._fetch_window(config, start, end, set())
+    assert categorized == {"cat": [{"message_id": "m1"}]}
+    assert returned is fetcher
+    fetcher.fetch.assert_called_once_with(
+        start, end, processed_ids=set(), exclude_chat_ids={"oc_x"})
+
+
+@patch("lark_listener.main.Analyzer")
+def test_analyze_window_returns_analysis(MockAnalyzer):
+    fetcher = MagicMock()
+    MockAnalyzer.return_value.analyze.return_value = {"oc": "analysis"}
+    config = {"context_messages": 0, "keywords": [],
+              "ai": {"provider": "claude", "model": "m", "api_key": "k", "base_url": ""}}
+    start = datetime(2026, 6, 9, 10, 0, tzinfo=main_mod.TZ)
+    end = datetime(2026, 6, 9, 11, 0, tzinfo=main_mod.TZ)
+    analysis = main_mod._analyze_window(
+        config, fetcher, {"cat": [{"message_id": "m1"}]}, start, end, "ou")
+    assert analysis == {"oc": "analysis"}
+    MockAnalyzer.return_value.analyze.assert_called_once()
+    fetcher.fetch_context.assert_not_called()

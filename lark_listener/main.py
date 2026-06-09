@@ -169,6 +169,42 @@ def _bot_listener():
             time.sleep(5)
 
 
+def _fetch_window(config, start, end, processed_ids):
+    """拉取 [start, end) 内的相关消息。返回 (categorized, fetcher)。
+    fetcher 一并返回，供 _analyze_window 取上下文（同一实例）。"""
+    exclude_ids = set(config.get("exclude_chat_ids", []))
+    fetcher = Fetcher(
+        keywords=config.get("keywords", []),
+        include_at_all=config.get("include_at_all", True),
+    )
+    categorized = fetcher.fetch(
+        start, end,
+        processed_ids=processed_ids,
+        exclude_chat_ids=exclude_ids or None,
+    )
+    return categorized, fetcher
+
+
+def _analyze_window(config, fetcher, categorized, start, end, my_user_id):
+    """取上下文 + 调 AI 分析。返回 analysis。"""
+    context = {}
+    context_limit = config.get("context_messages", 20)
+    if context_limit > 0:
+        context = fetcher.fetch_context(categorized, start, end, limit=context_limit)
+        ctx_total = sum(len(msgs) for msgs in context.values())
+        if ctx_total:
+            logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
+    ai_cfg = config["ai"]
+    analyzer = Analyzer(
+        provider=ai_cfg["provider"],
+        model=ai_cfg["model"],
+        api_key=ai_cfg.get("api_key", ""),
+        base_url=ai_cfg.get("base_url", ""),
+        keywords=config.get("keywords", []),
+    )
+    return analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
+
+
 def poll_once(
     config_path: Optional[str] = None,
     state_path: Optional[str] = None,
@@ -189,16 +225,8 @@ def poll_once(
     notify_cfg = config["notify"]
     my_user_id = notify_cfg["user_id"]
 
-    exclude_ids = set(config.get("exclude_chat_ids", []))
-    fetcher = Fetcher(
-        keywords=config.get("keywords", []),
-        include_at_all=config.get("include_at_all", True),
-    )
-    categorized = fetcher.fetch(
-        start, end,
-        processed_ids=set() if custom_start else state.processed_message_ids,
-        exclude_chat_ids=exclude_ids or None,
-    )
+    processed_ids = set() if custom_start else state.processed_message_ids
+    categorized, fetcher = _fetch_window(config, start, end, processed_ids)
 
     total = sum(len(msgs) for msgs in categorized.values())
     logger.info("Fetched %d new messages (from %s)", total, start.strftime("%m-%d %H:%M"))
@@ -211,31 +239,12 @@ def poll_once(
             state.save()
         return
 
-    # Manual trigger: report how many relevant messages were found and the
-    # rough AI analysis time, so the user knows how long to wait.
     if is_manual:
         est = estimate_ai_seconds(total)
         period = f"{start.strftime('%m-%d %H:%M')} ~ {end.strftime('%H:%M')}"
         _reply_bot(my_user_id, f"📊 {period} 找到 {total} 条相关消息，预计分析约 {format_duration(est)}")
 
-    # Fetch context messages for richer AI analysis
-    context_limit = config.get("context_messages", 20)
-    context = {}
-    if context_limit > 0:
-        context = fetcher.fetch_context(categorized, start, end, limit=context_limit)
-        ctx_total = sum(len(msgs) for msgs in context.values())
-        if ctx_total:
-            logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
-
-    ai_cfg = config["ai"]
-    analyzer = Analyzer(
-        provider=ai_cfg["provider"],
-        model=ai_cfg["model"],
-        api_key=ai_cfg.get("api_key", ""),
-        base_url=ai_cfg.get("base_url", ""),
-        keywords=config.get("keywords", []),
-    )
-    analysis = analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
+    analysis = _analyze_window(config, fetcher, categorized, start, end, my_user_id)
 
     notifier = Notifier(
         user_id=my_user_id,
