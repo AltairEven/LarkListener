@@ -23,3 +23,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["lark_listener*"]
+
+[tool.setuptools.package-data]
+lark_listener = ["skills/*/*.md"]
