@@ -53,6 +53,10 @@ fi
     || echo "⚠️  pip 升级失败（继续；若下一步安装失败请检查网络）"
 "$VENV/bin/pip" install --force-reinstall "git+$REPO"
 
+# 5b) 为受支持的 AI Agent 安装操作 skill（best-effort：失败不阻断安装；
+#     用 venv 绝对路径，因短命令软链可能尚未进 PATH）
+"$VENV/bin/lark-listener" agent-skills install || true
+
 # 6) 软链短命令（ensurepath 式，best-effort）。plist 另指向 venv 真实入口，软链仅为便利。
 #    优先「可写 且 已在 PATH」的目录（免改 shell 配置，brew 用户开箱即用）；
 #    否则用 ~/.local/bin 并把它幂等加入 PATH。
