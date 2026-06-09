@@ -166,32 +166,31 @@ def stop_service() -> None:
     subprocess.run(["pkill", "-f", "lark-cli event.*--as bot"], capture_output=True)
 
 
-def cmd_start() -> None:
+def cmd_start() -> int:
     if not PLIST_PATH.exists():
         print("❌ 未安装，请先运行: lark-listener setup")
-        return
+        return 1
     if _is_running():
         print("正在重启...")
-    # 无条件先 stop（unload 幂等 + 清理残留进程），再 load：覆盖「已 load 但未运行」
-    # 的限流/异常态——否则直接 load 会得到 already-loaded 错误（被 capture 吞掉），
-    # 随后误报启动失败。
     stop_service()
     subprocess.run(["launchctl", "load", str(PLIST_PATH)], capture_output=True)
     time.sleep(3)
     if _is_running():
         print("✓ 服务已启动")
-    else:
-        print(f"❌ 启动失败，请查看日志:\n  cat {LISTENER_HOME}/logs/stderr.log")
+        return 0
+    print(f"❌ 启动失败，请查看日志:\n  cat {LISTENER_HOME}/logs/stderr.log")
+    return 1
 
 
-def cmd_stop() -> None:
+def cmd_stop() -> int:
     stop_service()
     print("✓ 服务已停止")
+    return 0
 
 
-def cmd_restart() -> None:
+def cmd_restart() -> int:
     stop_service()
-    cmd_start()
+    return cmd_start()
 
 
 def _pids(pattern: str) -> list[str]:
@@ -291,21 +290,22 @@ def cmd_status(as_json: bool = False) -> int:
     return _STATUS_EXIT.get(st["state"], 1)
 
 
-def cmd_config() -> None:
+def cmd_config() -> int:
     cfg = LISTENER_HOME / "config.yaml"
     if not cfg.exists():
         print("❌ 配置文件不存在，请先运行: lark-listener setup")
-        return
+        return 1
     subprocess.run(["open", "-t", str(cfg)])
     print("✓ 已打开配置文件（修改后下次轮询自动生效）")
+    return 0
 
 
-def cmd_uninstall() -> None:
+def cmd_uninstall() -> int:
     print(f"⚠️  即将删除服务、launchd 配置、短命令软链与 {LISTENER_HOME}（含 venv、配置、日志）")
     confirm = input("确认卸载？(y/N) ").strip().lower()
     if confirm != "y":
         print("已取消")
-        return
+        return 0
     stop_service()
     PLIST_PATH.unlink(missing_ok=True)
     # 删软链：记录的实际位置（install.sh 可能建在 /opt/homebrew/bin 等）+ 默认位置。
@@ -325,3 +325,4 @@ def cmd_uninstall() -> None:
             pass
     shutil.rmtree(LISTENER_HOME, ignore_errors=True)  # 含 venv 与 shim_link 记录，一步删干净
     print("✓ 已卸载完成。")
+    return 0

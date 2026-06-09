@@ -323,3 +323,59 @@ def test_render_status_text_content(capsys):
     assert "/h/config.yaml" in out
     assert "/h/logs/" in out          # 目录尾部斜杠
     assert "上次轮询：2026-06-09T10:00:00+08:00" in out
+
+
+# --- Task 3: commands return exit codes ---
+
+
+def test_cmd_start_returns_1_when_not_installed(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, "PLIST_PATH", tmp_path / "nope.plist")
+    assert service.cmd_start() == 1
+
+
+def test_cmd_start_returns_0_when_running(monkeypatch, tmp_path):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(service.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(service, "_is_running", lambda: True)
+    assert service.cmd_start() == 0
+
+
+def test_cmd_stop_and_restart_return_int(monkeypatch):
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service, "cmd_start", lambda: 0)
+    assert service.cmd_stop() == 0
+    assert service.cmd_restart() == 0
+
+
+def test_cmd_config_missing_returns_1(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    assert service.cmd_config() == 1
+
+
+def test_cmd_start_returns_1_when_fails_to_run(monkeypatch, tmp_path):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(service.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(service, "_is_running", lambda: False)
+    assert service.cmd_start() == 1
+
+
+def test_cmd_restart_propagates_start_failure(monkeypatch):
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service, "cmd_start", lambda: 1)
+    assert service.cmd_restart() == 1
+
+
+def test_cmd_config_opens_when_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    (tmp_path / "config.yaml").write_text("x")
+    calls = []
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: calls.append(a))
+    assert service.cmd_config() == 0
+    assert calls  # open editor was invoked
