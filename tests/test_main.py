@@ -644,3 +644,23 @@ def test_cmd_summarize_empty_text_no_push(
     assert "没有可汇总的内容" in capsys.readouterr().out
     MockNotifier.return_value.notify.assert_not_called()
     assert code == 0
+
+
+def test_main_summarize_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["lark-listener", "summarize", "--start", "1000", "--end", "2000", "--quiet"])
+    seen = {}
+    monkeypatch.setattr(main_mod, "cmd_summarize",
+                        lambda start_ts, end_ts, quiet=False: seen.update(
+                            start=start_ts, end=end_ts, quiet=quiet) or 0)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
+    assert seen == {"start": 1000, "end": 2000, "quiet": True}
+
+
+def test_main_summarize_requires_start_end(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "summarize"])
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 2  # argparse usage error: missing required --start/--end

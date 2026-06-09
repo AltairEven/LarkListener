@@ -488,7 +488,7 @@ def main():
         epilog=(
             "AI agent 操作入口：`lark-listener doctor --json`（自检）与 "
             "`lark-listener status --json`（状态）是排查起点。\n"
-            "✅ 可非交互运行：start/stop/restart/status/doctor/config get/config set/agent-skills。\n"
+            "✅ 可非交互运行：start/stop/restart/status/doctor/summarize/config get/config set/agent-skills。\n"
             "🚫 交互式·交给用户：setup、uninstall、config（无参开 GUI）。\n"
             "\n"
             "配置文件：~/.lark_listener/config.yaml；日志：~/.lark_listener/logs/stderr.log\n"
@@ -527,6 +527,11 @@ def main():
 
     p_as = sub.add_parser("agent-skills", help="✅ 安装/卸载 AI Agent 操作 skill")
     p_as.add_argument("op", choices=["install", "uninstall"])
+
+    p_sum = sub.add_parser("summarize", help="✅ 按需汇总指定时间窗的消息到 stdout（AI agent 用）")
+    p_sum.add_argument("--start", type=int, required=True, help="起始 Unix 时间戳（秒）")
+    p_sum.add_argument("--end", type=int, required=True, help="结束 Unix 时间戳（秒）")
+    p_sum.add_argument("--quiet", action="store_true", help="只回 stdout，不推飞书/桌面通知")
 
     sub.add_parser("uninstall", help="🚫 交互式·交给用户：卸载（二次确认）")
 
@@ -569,6 +574,8 @@ def main():
         if args.op == "install":
             sys.exit(agent_adapters.install_agent_skills())
         sys.exit(agent_adapters.uninstall_agent_skills())
+    if cmd == "summarize":
+        sys.exit(cmd_summarize(args.start, args.end, quiet=args.quiet))
 
     parser.print_help()
 
