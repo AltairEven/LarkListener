@@ -247,3 +247,31 @@ def test_cmd_uninstall_removes_recorded_shim_plist_and_home(tmp_path, monkeypatc
     assert not plist.exists()
     assert not shim.exists()        # recorded shim (in another dir) removed
     assert not home.exists()        # data dir (incl. record) rmtree'd
+
+
+def test_collect_status_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "PLIST_PATH", tmp_path / "nope.plist")
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "_pids", lambda pat: [])
+    monkeypatch.setattr(service, "_recorded_shim", lambda: None)
+    st = service.collect_status()
+    assert st["state"] == "not_installed"
+    assert st["main_pids"] == []
+    assert st["files"]["config"]["exists"] is False
+    assert st["last_poll_time"] is None
+
+
+def test_collect_status_running_reads_last_poll(tmp_path, monkeypatch):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    (tmp_path / "state.json").write_text('{"last_poll_time": "2026-06-09T10:00:00+08:00"}')
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    monkeypatch.setattr(service, "VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(service, "_is_running", lambda: True)
+    monkeypatch.setattr(service, "_pids", lambda pat: ["123"])
+    monkeypatch.setattr(service, "_recorded_shim", lambda: None)
+    st = service.collect_status()
+    assert st["state"] == "running"
+    assert st["main_pids"] == ["123"]
+    assert st["last_poll_time"] == "2026-06-09T10:00:00+08:00"

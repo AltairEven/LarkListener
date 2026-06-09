@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -208,6 +209,49 @@ def _recorded_shim() -> Optional[str]:
         return SHIM_RECORD.read_text().strip() or None
     except OSError:
         return None
+
+
+def collect_status() -> dict:
+    """采集服务状态为机读 dict（cmd_status 的渲染数据源）。"""
+    if not PLIST_PATH.exists():
+        state = "not_installed"
+    elif _is_running():
+        state = "running"
+    else:
+        state = "stopped"
+
+    main_pids = _pids(f"{VENV_DIR}/bin/lark-listener run")
+    event_pids = _pids("lark-cli event.*--as bot")
+
+    shim = _recorded_shim() or str(SHIM_LINK)
+    paths = {
+        "config": LISTENER_HOME / "config.yaml",
+        "state": LISTENER_HOME / "state.json",
+        "logs": LISTENER_HOME / "logs",
+        "venv": VENV_DIR,
+        "launchd": PLIST_PATH,
+        "shim": Path(shim),
+    }
+    files = {
+        name: {"path": str(p), "exists": bool(p.exists() or p.is_symlink())}
+        for name, p in paths.items()
+    }
+
+    last_poll = None
+    state_file = paths["state"]
+    try:
+        if state_file.exists():
+            last_poll = json.loads(state_file.read_text(encoding="utf-8")).get("last_poll_time")
+    except Exception:
+        last_poll = None
+
+    return {
+        "state": state,
+        "main_pids": main_pids,
+        "event_pids": event_pids,
+        "files": files,
+        "last_poll_time": last_poll,
+    }
 
 
 def cmd_status() -> None:
