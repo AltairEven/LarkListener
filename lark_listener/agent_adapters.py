@@ -38,7 +38,9 @@ def _default_adapters():
     return [cls() for cls in ADAPTERS]
 
 
-def install_agent_skills(adapters=None) -> int:
+def install_agent_skills(adapters=None, quiet: bool = False) -> int:
+    """装/刷新各 agent 的操作 skill。quiet=True 时静默（仅失败仍吭声）——
+    供 cmd_start 每次启动自愈刷新用，不在正常 start 输出里刷屏。"""
     adapters = adapters if adapters is not None else _default_adapters()
     installed = []
     for ad in adapters:
@@ -48,6 +50,8 @@ def install_agent_skills(adapters=None) -> int:
                 installed.append(ad.name)
         except Exception as e:  # noqa: BLE001 — best-effort，不阻断安装
             print(f"  ⚠️ {ad.name} skill 安装失败（{e}），不影响服务运行。")
+    if quiet:
+        return 0
     if installed:
         print(f"✓ 已为 {', '.join(installed)} 安装操作 skill。")
     else:
