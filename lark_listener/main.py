@@ -6,6 +6,7 @@ import logging
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -430,40 +431,91 @@ def main():
         prog="lark-listener",
         description="飞书消息汇总后台服务：定时拉取未读消息 → AI 分析 → Bot 私聊推送汇总 + macOS 通知。",
         epilog=(
-            "日常使用（核心）：给 LarkListener Bot 发「汇总」/「总结」立即汇总一次；\n"
-            "发「帮助」查看用法、或用自然语言改配置（如「轮询间隔改成10分钟」「关注关键词 上线」）。\n"
+            "AI agent 操作入口：`lark-listener doctor --json`（自检）与 "
+            "`lark-listener status --json`（状态）是排查起点。\n"
+            "✅ 可非交互运行：start/stop/restart/status/doctor/config get/config set/agent-skills。\n"
+            "🚫 交互式·交给用户：setup、uninstall、config（无参开 GUI）。\n"
             "\n"
-            "配置文件：~/.lark_listener/config.yaml（或运行 `lark-listener config` 打开）。\n"
-            "日志：    ~/.lark_listener/logs/stderr.log\n"
+            "配置文件：~/.lark_listener/config.yaml；日志：~/.lark_listener/logs/stderr.log\n"
             "首次安装后请先运行 `lark-listener setup`。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
-    _CMDS = {
-        "run": "运行守护循环（launchd 调用，一般无需手动跑）",
-        "setup": "交互安装向导：选 Bot、配置轮询/关键词/AI、写 launchd、引导授权",
-        "start": "启动后台服务",
-        "stop": "停止后台服务",
-        "restart": "重启服务（升级或改代码后需要）",
-        "status": "查看服务运行状态",
-        "config": "打开配置文件进行编辑",
-        "uninstall": "停止服务并删除全部配置与数据",
-    }
-    for name, help_text in _CMDS.items():
-        sub.add_parser(name, help=help_text, description=help_text)
-    args = parser.parse_args()
 
-    if args.command == "run":
+    sub.add_parser("run", help="运行守护循环（launchd 调用，一般无需手动跑）")
+    sub.add_parser("setup", help="🚫 交互式·交给用户：安装向导（选 Bot/AI/轮询/授权）")
+    sub.add_parser("start", help="✅ 启动后台服务")
+    sub.add_parser("stop", help="✅ 停止后台服务")
+    sub.add_parser("restart", help="✅ 重启服务（升级或改代码后需要）")
+
+    p_status = sub.add_parser("status", help="✅ 查看服务运行状态")
+    p_status.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
+    p_doctor = sub.add_parser("doctor", help="✅ 主动自检诊断（排查起点）")
+    p_doctor.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_doctor.add_argument("--deep", action="store_true", help="对 AI 后端发真实最小请求")
+
+    p_config = sub.add_parser(
+        "config", help="✅ get/set 非交互改配置；🚫 无参=打开编辑器（人用）")
+    csub = p_config.add_subparsers(dest="op")
+    p_cget = csub.add_parser("get", help="✅ 查看配置（api_key 脱敏）")
+    p_cget.add_argument("key", nargs="?", help="点号路径，如 ai.provider；省略=全部")
+    p_cget.add_argument("--json", action="store_true")
+    p_cset = csub.add_parser("set", help="✅ 改配置（点号路径）")
+    p_cset.add_argument("key")
+    p_cset.add_argument("value")
+    grp = p_cset.add_mutually_exclusive_group()
+    grp.add_argument("--add", action="store_true", help="列表：增一项")
+    grp.add_argument("--remove", action="store_true", help="列表：减一项")
+    p_cset.add_argument("--force", action="store_true", help="放行受保护项 ai/notify/lark_cli_appid")
+
+    p_as = sub.add_parser("agent-skills", help="✅ 安装/卸载 AI Agent 操作 skill")
+    p_as.add_argument("op", choices=["install", "uninstall"])
+
+    sub.add_parser("uninstall", help="🚫 交互式·交给用户：卸载（二次确认）")
+
+    args = parser.parse_args()
+    cmd = args.command
+
+    if cmd == "run":
         run()
-    elif args.command == "setup":
+        return
+    if cmd == "setup":
         from lark_listener.setup_wizard import cmd_setup
         cmd_setup()
-    elif args.command in ("start", "stop", "restart", "status", "config", "uninstall"):
-        from lark_listener import service
-        getattr(service, f"cmd_{args.command}")()
-    else:
-        parser.print_help()
+        return
+
+    from lark_listener import service
+    if cmd == "start":
+        sys.exit(service.cmd_start())
+    if cmd == "stop":
+        sys.exit(service.cmd_stop())
+    if cmd == "restart":
+        sys.exit(service.cmd_restart())
+    if cmd == "status":
+        sys.exit(service.cmd_status(as_json=args.json))
+    if cmd == "uninstall":
+        sys.exit(service.cmd_uninstall())
+    if cmd == "doctor":
+        from lark_listener import doctor
+        sys.exit(doctor.cmd_doctor(as_json=args.json, deep=args.deep))
+    if cmd == "config":
+        if not args.op:
+            sys.exit(service.cmd_config())
+        from lark_listener import config_cli
+        if args.op == "get":
+            sys.exit(config_cli.config_get(args.key, as_json=args.json))
+        if args.op == "set":
+            sys.exit(config_cli.config_set(args.key, args.value, add=args.add,
+                                           remove=args.remove, force=args.force))
+    if cmd == "agent-skills":
+        from lark_listener import agent_adapters
+        if args.op == "install":
+            sys.exit(agent_adapters.install_agent_skills())
+        sys.exit(agent_adapters.uninstall_agent_skills())
+
+    parser.print_help()
 
 
 if __name__ == "__main__":
