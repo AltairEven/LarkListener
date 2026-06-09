@@ -413,3 +413,35 @@ def test_cmd_uninstall_skips_agent_skills_in_dev(monkeypatch, tmp_path):
     monkeypatch.setattr(aa, "uninstall_agent_skills", lambda: called.__setitem__("n", called["n"] + 1) or 0)
     assert service.cmd_uninstall() == 0
     assert called["n"] == 0   # dev 态不应触碰真机 ~/.claude
+
+
+def test_cmd_start_refreshes_skill_when_not_dev(monkeypatch, tmp_path):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(service.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(service, "_is_running", lambda: True)
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
+    called = {"n": 0}
+    import lark_listener.agent_adapters as aa
+    monkeypatch.setattr(aa, "install_agent_skills",
+                        lambda quiet=False: called.__setitem__("n", called["n"] + 1) or 0)
+    assert service.cmd_start() == 0
+    assert called["n"] == 1
+
+
+def test_cmd_start_skips_skill_refresh_in_dev(monkeypatch, tmp_path):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(service.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(service, "_is_running", lambda: True)
+    monkeypatch.setenv("LARK_LISTENER_HOME", str(tmp_path))
+    called = {"n": 0}
+    import lark_listener.agent_adapters as aa
+    monkeypatch.setattr(aa, "install_agent_skills",
+                        lambda quiet=False: called.__setitem__("n", called["n"] + 1) or 0)
+    assert service.cmd_start() == 0
+    assert called["n"] == 0  # dev 隔离不碰真机 ~/.claude

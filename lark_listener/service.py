@@ -170,6 +170,14 @@ def cmd_start() -> int:
     if not PLIST_PATH.exists():
         print("❌ 未安装，请先运行: lark-listener setup")
         return 1
+    # 每次 (re)start 顺手把操作 skill 静默刷新到当前版本（升级必经 restart → 自动对齐；
+    # 文件缺失也会补回）。best-effort，dev 隔离态跳过——绝不碰真机 ~/.claude。
+    if not os.environ.get("LARK_LISTENER_HOME"):
+        try:
+            from lark_listener.agent_adapters import install_agent_skills
+            install_agent_skills(quiet=True)
+        except Exception:  # noqa: BLE001
+            pass
     if _is_running():
         print("正在重启...")
     stop_service()

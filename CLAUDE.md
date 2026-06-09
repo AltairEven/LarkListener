@@ -80,7 +80,7 @@ python3 -m pytest -q       # 全绿才算改完
   失败也不影响安装（服务/命令用 venv 绝对路径仍可运行）。安装末尾 best-effort 调
   `agent-skills install`：检测到 Claude Code（`~/.claude/` 存在）时，把操作 skill 拷进
   `~/.claude/skills/lark-listener/`，供任意 Claude 会话自动发现如何操作本服务。
-- 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。skill 随升级一并刷新（同包同版本，避免与命令漂移）。
+- 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。**skill 在 `cmd_start` 里自愈刷新**：每次 `restart` 静默把 `~/.claude/skills/lark-listener` 同步到当前包版本（detect 命中才写、dev 隔离跳过），故升级 restart 即与二进制对齐、文件缺失也会补回——pip 单独装不刷新，但只要按约定 restart 就对齐。
 - 卸载：`lark-listener uninstall`（停服务、删 plist/软链/`~/.lark_listener`，并清理 `~/.claude/skills/lark-listener`；dev 隔离态不碰真机 `~/.claude`）。
 
 ## 运行情况 & 文件布局（排查/清理用）

@@ -52,3 +52,12 @@ def test_uninstall_agent_skills_best_effort():
             raise OSError("denied")
 
     assert agent_adapters.uninstall_agent_skills(adapters=[_Bad()]) == 0
+
+
+def test_install_agent_skills_quiet_no_summary(tmp_path, capsys):
+    claude = tmp_path / ".claude"; claude.mkdir()
+    ad = agent_adapters.ClaudeCodeAdapter(skills_dir=claude / "skills")
+    code = agent_adapters.install_agent_skills(adapters=[ad], quiet=True)
+    assert code == 0
+    assert capsys.readouterr().out == ""  # 静默：无 summary 输出
+    assert (claude / "skills" / "lark-listener" / "SKILL.md").is_file()  # 但确实装了
