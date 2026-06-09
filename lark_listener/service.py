@@ -307,9 +307,11 @@ def cmd_uninstall() -> int:
         print("已取消")
         return 0
     stop_service()
-    # 清理为各 AI Agent 安装的操作 skill（独立目录，与 LISTENER_HOME 无耦合）
-    from lark_listener.agent_adapters import uninstall_agent_skills
-    uninstall_agent_skills()
+    # 清理为各 AI Agent 安装的操作 skill（生产路径 ~/.claude）。dev 隔离态（设了
+    # LARK_LISTENER_HOME）直接跳过，与 ensure_shim_link 同理——绝不碰真机 ~/.claude。
+    if not os.environ.get("LARK_LISTENER_HOME"):
+        from lark_listener.agent_adapters import uninstall_agent_skills
+        uninstall_agent_skills()
     PLIST_PATH.unlink(missing_ok=True)
     # 删软链：记录的实际位置（install.sh 可能建在 /opt/homebrew/bin 等）+ 默认位置。
     # 必须在 rmtree 之前读取 SHIM_RECORD（它在 LISTENER_HOME 内）。

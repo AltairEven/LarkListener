@@ -390,8 +390,26 @@ def test_cmd_uninstall_calls_agent_skills(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "SHIM_RECORD", home / "shim_link")
     monkeypatch.setattr(service, "stop_service", lambda: None)
     monkeypatch.setattr("builtins.input", lambda *_: "y")
+    monkeypatch.delenv("LARK_LISTENER_HOME", raising=False)
     called = {"n": 0}
     import lark_listener.agent_adapters as aa
     monkeypatch.setattr(aa, "uninstall_agent_skills", lambda: called.__setitem__("n", called["n"] + 1) or 0)
     assert service.cmd_uninstall() == 0
     assert called["n"] == 1
+
+
+def test_cmd_uninstall_skips_agent_skills_in_dev(monkeypatch, tmp_path):
+    plist = tmp_path / "svc.plist"; plist.write_text("x")
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setattr(service, "PLIST_PATH", plist)
+    monkeypatch.setattr(service, "LISTENER_HOME", home)
+    monkeypatch.setattr(service, "SHIM_LINK", tmp_path / "shim")
+    monkeypatch.setattr(service, "SHIM_RECORD", home / "shim_link")
+    monkeypatch.setattr(service, "stop_service", lambda: None)
+    monkeypatch.setattr("builtins.input", lambda *_: "y")
+    monkeypatch.setenv("LARK_LISTENER_HOME", str(home))   # dev 隔离态
+    called = {"n": 0}
+    import lark_listener.agent_adapters as aa
+    monkeypatch.setattr(aa, "uninstall_agent_skills", lambda: called.__setitem__("n", called["n"] + 1) or 0)
+    assert service.cmd_uninstall() == 0
+    assert called["n"] == 0   # dev 态不应触碰真机 ~/.claude
