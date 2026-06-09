@@ -1,5 +1,6 @@
 import os
 import tempfile
+import pytest
 from unittest.mock import patch, MagicMock
 from lark_listener.main import poll_once
 from lark_listener.fetcher import MessageCategory
@@ -461,8 +462,83 @@ def test_main_no_subcommand_does_not_run(mock_run, monkeypatch):
     mock_run.assert_not_called()
 
 
-@patch("lark_listener.service.cmd_start")
+@patch("lark_listener.service.cmd_start", return_value=0)
 def test_main_start_subcommand_dispatches_to_service(mock_start, monkeypatch):
     monkeypatch.setattr(_sys, "argv", ["lark-listener", "start"])
-    main_mod.main()
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
     mock_start.assert_called_once()
+
+
+def test_main_status_dispatch_exit_code(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "status", "--json"])
+    from lark_listener import service
+    monkeypatch.setattr(service, "cmd_status", lambda as_json=False: 3 if as_json else 0)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 3
+
+
+def test_main_config_set_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["lark-listener", "config", "set", "keywords", "上线", "--add"])
+    captured = {}
+    from lark_listener import config_cli
+    def fake_set(key, value, add=False, remove=False, force=False):
+        captured.update(key=key, value=value, add=add, remove=remove, force=force)
+        return 0
+    monkeypatch.setattr(config_cli, "config_set", fake_set)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
+    assert captured == {"key": "keywords", "value": "上线", "add": True,
+                        "remove": False, "force": False}
+
+
+def test_main_doctor_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "doctor", "--deep"])
+    from lark_listener import doctor
+    seen = {}
+    monkeypatch.setattr(doctor, "cmd_doctor",
+                        lambda as_json=False, deep=False: seen.update(deep=deep) or 1)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 1 and seen["deep"] is True
+
+
+def test_main_agent_skills_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "agent-skills", "install"])
+    from lark_listener import agent_adapters
+    monkeypatch.setattr(agent_adapters, "install_agent_skills", lambda: 0)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
+
+
+def test_main_config_get_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["lark-listener", "config", "get", "ai.provider", "--json"])
+    captured = {}
+    from lark_listener import config_cli
+    def fake_get(key=None, as_json=False):
+        captured.update(key=key, as_json=as_json)
+        return 0
+    monkeypatch.setattr(config_cli, "config_get", fake_get)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0
+    assert captured == {"key": "ai.provider", "as_json": True}
+
+
+def test_main_agent_skills_uninstall_dispatch(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["lark-listener", "agent-skills", "uninstall"])
+    from lark_listener import agent_adapters
+    seen = {}
+    def fake_uninstall():
+        seen["u"] = True
+        return 0
+    monkeypatch.setattr(agent_adapters, "uninstall_agent_skills", fake_uninstall)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.main()
+    assert ei.value.code == 0 and seen["u"] is True

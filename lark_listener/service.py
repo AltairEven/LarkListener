@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -165,32 +166,31 @@ def stop_service() -> None:
     subprocess.run(["pkill", "-f", "lark-cli event.*--as bot"], capture_output=True)
 
 
-def cmd_start() -> None:
+def cmd_start() -> int:
     if not PLIST_PATH.exists():
         print("❌ 未安装，请先运行: lark-listener setup")
-        return
+        return 1
     if _is_running():
         print("正在重启...")
-    # 无条件先 stop（unload 幂等 + 清理残留进程），再 load：覆盖「已 load 但未运行」
-    # 的限流/异常态——否则直接 load 会得到 already-loaded 错误（被 capture 吞掉），
-    # 随后误报启动失败。
     stop_service()
     subprocess.run(["launchctl", "load", str(PLIST_PATH)], capture_output=True)
     time.sleep(3)
     if _is_running():
         print("✓ 服务已启动")
-    else:
-        print(f"❌ 启动失败，请查看日志:\n  cat {LISTENER_HOME}/logs/stderr.log")
+        return 0
+    print(f"❌ 启动失败，请查看日志:\n  cat {LISTENER_HOME}/logs/stderr.log")
+    return 1
 
 
-def cmd_stop() -> None:
+def cmd_stop() -> int:
     stop_service()
     print("✓ 服务已停止")
+    return 0
 
 
-def cmd_restart() -> None:
+def cmd_restart() -> int:
     stop_service()
-    cmd_start()
+    return cmd_start()
 
 
 def _pids(pattern: str) -> list[str]:
@@ -210,52 +210,108 @@ def _recorded_shim() -> Optional[str]:
         return None
 
 
-def cmd_status() -> None:
+def collect_status() -> dict:
+    """采集服务状态为机读 dict（cmd_status 的渲染数据源）。"""
     if not PLIST_PATH.exists():
-        print("◇ 未安装")
+        state = "not_installed"
     elif _is_running():
-        print("● 服务运行中")
+        state = "running"
     else:
-        print("○ 服务已安装，未运行")
+        state = "stopped"
 
     main_pids = _pids(f"{VENV_DIR}/bin/lark-listener run")
     event_pids = _pids("lark-cli event.*--as bot")
+
+    shim = _recorded_shim() or str(SHIM_LINK)
+    paths = {
+        "config": LISTENER_HOME / "config.yaml",
+        "state": LISTENER_HOME / "state.json",
+        "logs": LISTENER_HOME / "logs",
+        "venv": VENV_DIR,
+        "launchd": PLIST_PATH,
+        "shim": Path(shim),
+    }
+    files = {
+        name: {"path": str(p), "exists": bool(p.exists() or p.is_symlink())}
+        for name, p in paths.items()
+    }
+
+    last_poll = None
+    state_file = paths["state"]
+    try:
+        if state_file.exists():
+            last_poll = json.loads(state_file.read_text(encoding="utf-8")).get("last_poll_time")
+    except Exception:
+        last_poll = None
+
+    return {
+        "state": state,
+        "main_pids": main_pids,
+        "event_pids": event_pids,
+        "files": files,
+        "last_poll_time": last_poll,
+    }
+
+
+_STATUS_EXIT = {"running": 0, "stopped": 3, "not_installed": 4}
+
+
+def _render_status_text(st: dict) -> None:
+    label = {"running": "● 服务运行中", "stopped": "○ 服务已安装，未运行",
+             "not_installed": "◇ 未安装"}
+    print(label.get(st["state"], st["state"]))
     print("\n进程：")
-    print(f"  主进程 (lark-listener run)  : {' '.join(main_pids) or '无'}")
-    print(f"  监听子进程 (lark-cli event) : {' '.join(event_pids) or '无'}")
-
-    def mark(p: Path) -> str:
-        return "✓" if (p.exists() or p.is_symlink()) else "—"
-
-    shim = _recorded_shim()
+    print(f"  主进程 (lark-listener run)  : {' '.join(st['main_pids']) or '无'}")
+    print(f"  监听子进程 (lark-cli event) : {' '.join(st['event_pids']) or '无'}")
     print("\n文件位置：")
-    print(f"  配置     {mark(LISTENER_HOME / 'config.yaml')} {LISTENER_HOME / 'config.yaml'}")
-    print(f"  状态     {mark(LISTENER_HOME / 'state.json')} {LISTENER_HOME / 'state.json'}")
-    print(f"  日志     {mark(LISTENER_HOME / 'logs')} {LISTENER_HOME / 'logs'}/")
-    print(f"  venv     {mark(VENV_DIR)} {VENV_DIR}")
-    print(f"  launchd  {mark(PLIST_PATH)} {PLIST_PATH}")
-    if shim:
-        print(f"  短命令   {mark(Path(shim))} {shim}")
+    rows = [("config", "配置     "), ("state", "状态     "), ("logs", "日志     "),
+            ("venv", "venv     "), ("launchd", "launchd  "), ("shim", "短命令   ")]
+    for key, label_txt in rows:
+        info = st["files"].get(key)
+        if not info:
+            continue
+        mark = "✓" if info["exists"] else "—"
+        path = info["path"] + ("/" if key == "logs" else "")
+        print(f"  {label_txt}{mark} {path}")
+    if st["last_poll_time"]:
+        print(f"\n上次轮询：{st['last_poll_time']}")
+
+
+def cmd_status(as_json: bool = False) -> int:
+    try:
+        st = collect_status()
+    except Exception as e:  # noqa: BLE001 — 诊断命令本身不可崩
+        print(f"❌ 状态获取失败：{e}")
+        return 1
+    if as_json:
+        print(json.dumps(st, ensure_ascii=False, indent=2))
     else:
-        print(f"  短命令   {mark(SHIM_LINK)} {SHIM_LINK}（默认位置）")
+        _render_status_text(st)
+    return _STATUS_EXIT.get(st["state"], 1)
 
 
-def cmd_config() -> None:
+def cmd_config() -> int:
     cfg = LISTENER_HOME / "config.yaml"
     if not cfg.exists():
         print("❌ 配置文件不存在，请先运行: lark-listener setup")
-        return
+        return 1
     subprocess.run(["open", "-t", str(cfg)])
     print("✓ 已打开配置文件（修改后下次轮询自动生效）")
+    return 0
 
 
-def cmd_uninstall() -> None:
+def cmd_uninstall() -> int:
     print(f"⚠️  即将删除服务、launchd 配置、短命令软链与 {LISTENER_HOME}（含 venv、配置、日志）")
     confirm = input("确认卸载？(y/N) ").strip().lower()
     if confirm != "y":
         print("已取消")
-        return
+        return 0
     stop_service()
+    # 清理为各 AI Agent 安装的操作 skill（生产路径 ~/.claude）。dev 隔离态（设了
+    # LARK_LISTENER_HOME）直接跳过，与 ensure_shim_link 同理——绝不碰真机 ~/.claude。
+    if not os.environ.get("LARK_LISTENER_HOME"):
+        from lark_listener.agent_adapters import uninstall_agent_skills
+        uninstall_agent_skills()
     PLIST_PATH.unlink(missing_ok=True)
     # 删软链：记录的实际位置（install.sh 可能建在 /opt/homebrew/bin 等）+ 默认位置。
     # 必须在 rmtree 之前读取 SHIM_RECORD（它在 LISTENER_HOME 内）。
@@ -274,3 +330,4 @@ def cmd_uninstall() -> None:
             pass
     shutil.rmtree(LISTENER_HOME, ignore_errors=True)  # 含 venv 与 shim_link 记录，一步删干净
     print("✓ 已卸载完成。")
+    return 0

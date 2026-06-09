@@ -66,11 +66,19 @@ your Bash tool will hang or hit EOF and leave a half-configured install.
 
 ## ✅ Safe for you to run
 
-- `lark-listener status` — diagnostics: service state + main/listener PIDs + every
-  file location. **Start here when something is wrong.**
-- `lark-listener start` / `stop` / `restart` — non-interactive service control.
+- `lark-listener doctor [--json] [--deep]` — active self-check (config / service /
+  lark-cli auth / poll freshness / logs / AI backend), each finding carries a `fix`.
+  **Start here when something is wrong.** Exit 0 = all pass, 1 = has a fail.
+- `lark-listener status [--json]` — service state + main/listener PIDs + file
+  locations + last poll. Exit 0 running / 3 stopped / 4 not installed.
+- `lark-listener config get [KEY] [--json]` — view config (api_key masked).
+- `lark-listener config set KEY VALUE [--add|--remove] [--force]` — non-interactive
+  edit; dotted paths (`poll_interval`, `keywords`, `ai.model`, …); protected keys
+  (`ai`/`notify`/`lark_cli_appid`) need `--force`; takes effect next poll.
+- `lark-listener start | stop | restart` — non-interactive service control.
+- `lark-listener agent-skills install | uninstall` — manage on-machine operating skill.
 - `lark-cli profile list` — enumerate available bots.
-- `tail -n 100 ~/.lark_listener/logs/stderr.log` — logs (most failures leave a trace).
+- `tail -n 100 ~/.lark_listener/logs/stderr.log` — logs.
 
 ## Operating it (chat, not shell)
 
@@ -94,6 +102,13 @@ lark-listener restart   # required — without it the old code keeps running
 - **Bot silent** → `lark-listener status`; if not running → `lark-listener start`.
 - **No desktop notification** → secondary channel only; the bot DM still arrives, safe to ignore.
 - First look: `tail -n 100 ~/.lark_listener/logs/stderr.log`.
+
+## On-machine discovery (Claude Code)
+
+Installing LarkListener also drops a Claude Code skill at
+`~/.claude/skills/lark-listener/` (when `~/.claude/` exists), so any later Claude
+session auto-discovers how to operate the service — no need to re-fetch this file.
+The skill defers to `lark-listener --help` / `doctor` as the source of truth.
 
 ## Paths
 
