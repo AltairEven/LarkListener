@@ -10,14 +10,17 @@
 
 | 模块 | 职责 |
 |---|---|
-| `main.py` | `main()` 是 argparse 子命令分发器；`run()` 是守护循环（launchd 调用）；`poll_once`/`_handle_message`/`_bot_listener` 等守护逻辑 |
-| `service.py` | launchd 管理：路径/plist 生成（`shim_path`/`node_bin_dir`/`build_plist`）、`stop_service`、`cmd_start/stop/restart/status/config/uninstall`、`ensure_shim_link` |
+| `main.py` | `main()` argparse 分发器（子命令均返回退出码经 `sys.exit`：status/doctor/config get-set/summarize/agent-skills/start/stop/restart/…）；`run()` 守护循环；`poll_once`/`_handle_message`/`_bot_listener` 守护逻辑；`_fetch_window`/`_analyze_window`（poll_once 与 summarize 共用的「产出」核心）；`cmd_summarize`（按需汇总→stdout，默认也推飞书） |
+| `service.py` | launchd 管理：`shim_path`/`node_bin_dir`/`build_plist`/`stop_service`/`ensure_shim_link`；`collect_status`（机读状态 dict）+ `cmd_start/stop/restart/status/config/uninstall`（均返回退出码；`cmd_uninstall` 兼清理 agent skill，dev 隔离态跳过） |
 | `setup_wizard.py` | 交互安装向导 `cmd_setup`；纯函数 `build_config_dict`/`write_config_file`/`ai_packages_for`/`_pip_install_ai` |
 | `analyzer.py` / `intent.py` | 调 AI（**延迟 import** anthropic/openai；ollama 走标准库 urllib） |
 | `fetcher.py` | 调 `lark-cli` 搜消息、取上下文 |
 | `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`（被 main/fetcher/notifier/setup 依赖） |
 | `notifier.py` | Bot 消息 + macOS 通知（osascript 默认，terminal-notifier 可选） |
 | `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify` 受保护不可经 bot 改） |
+| `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend`（浅检零副作用；`--deep` 真打最小请求）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
+| `config_cli.py` | `config get/set` 非交互：点号路径、列表增/减/整体替换、`--force` 放行受保护键、写后 `_validate` 失败回滚、api_key 脱敏；只复用 `config_editor` 底层（不复用其 bot 调度） |
+| `agent_adapters.py` | 可插拔 adapter 注册表 + `ClaudeCodeAdapter`（装/卸 `~/.claude/skills/lark-listener` 操作 skill，包内资源经 importlib.resources 读）；`install/uninstall_agent_skills`（best-effort） |
 | `state.py` | 去重与上次轮询时间 |
 
 ## 测试规范（核心）
@@ -60,7 +63,7 @@ python3 -m pytest -q       # 全绿才算改完
 
 6. **best-effort 不可抛**：`notifier` 通知失败、`_reply_bot`、AI/网络调用失败都不能让轮询循环崩溃（launchd KeepAlive 会陷入重启循环）。
 
-7. **守护循环符号被测试依赖**：`poll_once`/`_handle_message`/`_reply_bot`/`_add_reaction`/`_pending_change` 保持原位、原签名。
+7. **守护循环符号被测试依赖**：`poll_once`/`_handle_message`/`_reply_bot`/`_add_reaction`/`_pending_change` 保持原位、原签名。`poll_once` 已把 fetch/analyze 拆到 `_fetch_window`/`_analyze_window`（与 `cmd_summarize` 共用）——改动时保持其行为与这两个 helper 的签名（单测直接依赖，且 poll_once 测试 `@patch("lark_listener.main.Fetcher/Analyzer/Notifier")` 要求它们留在 main.py）。
 
 8. **每次隔离真跑后清理**：`./dev-test.sh clean` 或手动删 `/tmp/ll-*` 与对应 dev plist + `launchctl unload`。
 
@@ -74,13 +77,15 @@ python3 -m pytest -q       # 全绿才算改完
   ensurepath 策略选：优先「可写+已在 PATH」的目录（`~/.local/bin`→`/opt/homebrew/bin`→
   `/usr/local/bin`，brew 用户免改配置）；否则用 `~/.local/bin` 并幂等注入 shell rc 的 PATH。
   实际软链位置记录在 `~/.lark_listener/shim_link`，`uninstall` 据此精确清理。软链全程 best-effort，
-  失败也不影响安装（服务/命令用 venv 绝对路径仍可运行）。
-- 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。
-- 卸载：`lark-listener uninstall`（停服务、删 plist/软链/`~/.lark_listener`）。
+  失败也不影响安装（服务/命令用 venv 绝对路径仍可运行）。安装末尾 best-effort 调
+  `agent-skills install`：检测到 Claude Code（`~/.claude/` 存在）时，把操作 skill 拷进
+  `~/.claude/skills/lark-listener/`，供任意 Claude 会话自动发现如何操作本服务。
+- 升级：`~/.lark_listener/venv/bin/pip install --force-reinstall "git+…"` + `lark-listener restart`（不重启跑的还是旧代码）。skill 随升级一并刷新（同包同版本，避免与命令漂移）。
+- 卸载：`lark-listener uninstall`（停服务、删 plist/软链/`~/.lark_listener`，并清理 `~/.claude/skills/lark-listener`；dev 隔离态不碰真机 `~/.claude`）。
 
 ## 运行情况 & 文件布局（排查/清理用）
 
-`lark-listener status` 是诊断入口，输出：服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。
+`lark-listener doctor` 是主动自检入口（config/lark-cli 授权/轮询时效/日志/AI 后端，每项带 `fix`，`--deep` 验后端真连）；`lark-listener status` 输出服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。二者均支持 `--json` 供 AI agent 机读；退出码：status 0 运行/3 停/4 未装，doctor 0 全过/1 有 fail。
 
 - 进程构成：1 个主进程 `… lark-listener run`（launchd KeepAlive 守护）+ `lark-cli event +subscribe … --as bot` 监听子进程（node 壳 + Go 二进制，由监听线程拉起，断开会按间隔重连）。
 - 文件布局：

@@ -102,7 +102,9 @@ lark-listener restart
 
 ## 六、出问题了？
 
-先看日志，多数问题都能在里面找到线索：
+想一次性自检，可跑 `lark-listener doctor`——它会逐项检查配置、`lark-cli` 授权、服务状态、上次轮询时效、AI 后端，并对有问题的项给出修复建议。
+
+或先看日志，多数问题都能在里面找到线索：
 
 ```bash
 tail -f ~/.lark_listener/logs/stderr.log
