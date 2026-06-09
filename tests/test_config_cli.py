@@ -64,3 +64,79 @@ def test_config_path_explicit_overrides_env(monkeypatch):
     monkeypatch.setenv("LARK_LISTENER_HOME", "/somewhere")
     from pathlib import Path
     assert config_cli._config_path("/tmp/explicit.yaml") == Path("/tmp/explicit.yaml")
+
+
+def _write_cfg(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "poll_interval: 300\n"
+        "keywords:\n  - 上线\n"
+        "ai:\n  provider: claude\n  model: m\n  api_key: secret\n  base_url: ''\n"
+        "notify:\n  user_id: ou_x\n  bot_chat_id: oc_y\n"
+        "lark_cli_appid: cli_x\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_config_set_scalar(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("poll_interval", "600", path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["poll_interval"] == 600
+
+
+def test_config_set_list_replace_add_remove(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("keywords", "故障,告警", path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["keywords"] == ["故障", "告警"]
+    assert config_cli.config_set("keywords", "上线", add=True, path=p) == 0
+    assert "上线" in config_cli.config_mod.load_config(str(p))["keywords"]
+    assert config_cli.config_set("keywords", "故障", remove=True, path=p) == 0
+    assert "故障" not in config_cli.config_mod.load_config(str(p))["keywords"]
+
+
+def test_config_set_protected_needs_force(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("ai.model", "m2", path=p) == 1          # 无 force 拒绝
+    assert config_cli.config_set("ai.model", "m2", force=True, path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["ai"]["model"] == "m2"
+
+
+def test_config_set_validation_rollback(tmp_path):
+    p = _write_cfg(tmp_path)
+    # 把必填的 ai.model 清空 → _validate 失败 → 应回滚到原值。
+    # 注意：不能字节比对原文件（ruamel 回滚会重新 dump，格式不保证逐字节一致），
+    # 改为校验「值已回到原值」。
+    assert config_cli.config_set("ai.model", "", force=True, path=p) == 1
+    assert config_cli.config_mod.load_config(str(p))["ai"]["model"] == "m"
+
+
+def test_config_set_add_on_scalar_errors(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("poll_interval", "5", add=True, path=p) == 1
+
+
+def test_config_set_preserves_comments(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("# 轮询秒数\npoll_interval: 300\nkeywords: []\n"
+                 "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
+                 "notify:\n  user_id: ou\n  bot_chat_id: oc\n"
+                 "lark_cli_appid: cli\n", encoding="utf-8")
+    config_cli.config_set("poll_interval", "600", path=p)
+    assert "# 轮询秒数" in p.read_text(encoding="utf-8")
+
+
+def test_config_set_unknown_top_level_key(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("nope", "5", path=p) == 1
+
+
+def test_config_set_add_and_remove_conflict(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("keywords", "x", add=True, remove=True, path=p) == 1
+
+
+def test_config_set_keywords_empty_clears(tmp_path):
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("keywords", "", path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["keywords"] == []
