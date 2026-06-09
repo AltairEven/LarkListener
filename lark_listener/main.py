@@ -18,7 +18,7 @@ from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
-from lark_listener.notifier import Notifier
+from lark_listener.notifier import Notifier, build_summary_text
 from lark_listener.state import State
 
 TZ = timezone(timedelta(hours=8))
@@ -268,6 +268,52 @@ def poll_once(
         state.save()
 
     logger.info("Summary sent successfully")
+
+
+def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
+    """按需汇总 [start_ts, end_ts]（Unix 秒）内的消息到 stdout。
+    默认也推飞书 DM + 桌面通知；--quiet 只回 stdout。只读，不碰 state。"""
+    if start_ts >= end_ts:
+        print("❌ --start 必须早于 --end")
+        return 1
+    try:
+        config = load_config()
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ 读取配置失败：{e}")
+        return 1
+    set_lark_profile(config.get("lark_cli_appid"))
+    start = datetime.fromtimestamp(start_ts, TZ)
+    end = datetime.fromtimestamp(end_ts, TZ)
+    period_s = start.strftime("%m-%d %H:%M")
+    period_e = end.strftime("%m-%d %H:%M")
+    my_user_id = config["notify"]["user_id"]
+
+    try:
+        categorized, fetcher = _fetch_window(config, start, end, set())
+        total = sum(len(msgs) for msgs in categorized.values())
+        if total == 0:
+            print(f"📭 {period_s} ~ {period_e} 期间没有新消息")
+            return 0
+        analysis = _analyze_window(config, fetcher, categorized, start, end, my_user_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ 汇总失败：{e}")
+        return 1
+
+    text = build_summary_text(categorized, analysis, period_s, period_e, my_user_id)
+    if not text:
+        print(f"📭 {period_s} ~ {period_e} 期间没有可汇总的内容")
+        return 0
+    print(text)
+
+    if not quiet:
+        try:
+            Notifier(
+                user_id=my_user_id,
+                bot_chat_id=config["notify"]["bot_chat_id"],
+            ).notify(categorized, analysis, period_s, period_e, my_user_id=my_user_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"（飞书推送失败，已忽略：{e}）")
+    return 0
 
 
 def _handle_message(content: str, sender_id: str, config_path: str, state_path: str,

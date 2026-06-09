@@ -572,3 +572,75 @@ def test_analyze_window_returns_analysis(MockAnalyzer):
     assert analysis == {"oc": "analysis"}
     MockAnalyzer.return_value.analyze.assert_called_once()
     fetcher.fetch_context.assert_not_called()
+
+
+def test_cmd_summarize_start_after_end_errors():
+    assert main_mod.cmd_summarize(2000, 1000) == 1
+    assert main_mod.cmd_summarize(1000, 1000) == 1
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_default_pushes_feishu_and_stdout(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=False)
+    out = capsys.readouterr().out
+    assert "汇总ABC" in out
+    MockNotifier.return_value.notify.assert_called_once()
+    args = mock_fw.call_args.args
+    assert args[1] == datetime.fromtimestamp(1000, main_mod.TZ)
+    assert args[2] == datetime.fromtimestamp(2000, main_mod.TZ)
+    assert code == 0
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_quiet_skips_feishu(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=True)
+    assert "汇总ABC" in capsys.readouterr().out
+    MockNotifier.return_value.notify.assert_not_called()
+    assert code == 0
+
+
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_no_messages(mock_cfg, mock_prof, mock_fw, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000)
+    assert "没有新消息" in capsys.readouterr().out
+    assert code == 0
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.build_summary_text", return_value="")
+@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_empty_text_no_push(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000, quiet=False)
+    assert "没有可汇总的内容" in capsys.readouterr().out
+    MockNotifier.return_value.notify.assert_not_called()
+    assert code == 0
