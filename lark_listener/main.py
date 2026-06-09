@@ -282,8 +282,12 @@ def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
         print(f"❌ 读取配置失败：{e}")
         return 1
     set_lark_profile(config.get("lark_cli_appid"))
-    start = datetime.fromtimestamp(start_ts, TZ)
-    end = datetime.fromtimestamp(end_ts, TZ)
+    try:
+        start = datetime.fromtimestamp(start_ts, TZ)
+        end = datetime.fromtimestamp(end_ts, TZ)
+    except (ValueError, OverflowError, OSError) as e:
+        print(f"❌ 时间戳无效（应为 Unix 秒，注意不是毫秒）：{e}")
+        return 1
     period_s = start.strftime("%m-%d %H:%M")
     period_e = end.strftime("%m-%d %H:%M")
     my_user_id = config["notify"]["user_id"]

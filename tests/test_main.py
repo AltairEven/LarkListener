@@ -664,3 +664,14 @@ def test_main_summarize_requires_start_end(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         main_mod.main()
     assert ei.value.code == 2  # argparse usage error: missing required --start/--end
+
+
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_out_of_range_timestamp(mock_cfg, mock_prof, capsys):
+    # AI agent 误传毫秒时间戳 → 应友好报错而非 traceback
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    code = main_mod.cmd_summarize(1_000_000, 1_717_900_000_000)
+    assert code == 1
+    assert "时间戳无效" in capsys.readouterr().out
