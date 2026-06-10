@@ -21,7 +21,7 @@ lark-listener summarize --start $(date -v-30M +%s) --end $(date +%s) --quiet
   - `code: 0` 成功，`data.conversations` 为会话数组（空数组＝该时间窗没有可汇总内容）；
   - `code != 0` 出错，看 `errorMsg`。**先 `json.loads` 再判 `code`，不要把 stdout 当人读文本转发**；
     给用户转述时用 `data` 里的 `title`/`summary`/`snippet`/`link` 自行组织。
-- 你（AI）自己要拿结果看就加 `--quiet`（只回 stdout，不打扰用户飞书）；想让用户也在飞书收到，就去掉 `--quiet`（推飞书交互卡片）。
+- 你（AI）自己要拿结果看就加 `--quiet`（只回 stdout，不打扰用户）；想让用户也收到，就去掉 `--quiet`（推飞书交互卡片 + 弹 macOS 桌面通知）。
 - 只读：不写 state、不影响正在跑的定时轮询，可随时跑。
 
 ## 先诊断
@@ -43,6 +43,7 @@ lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上
   - `poll_interval` 为非负整数秒，**0 = 关闭自动轮询**（服务保持在线，仅 bot 按需汇总/改配置）
   - 列表：整体 `config set keywords a,b`；增 `--add`；减 `--remove`
   - 受保护项（`ai`/`notify`/`lark_cli_appid`）需 `--force`
+  - **例外：改 `lark_cli_appid` 后需 `lark-listener restart` 才生效**（bot 监听子进程按启动时的 profile 订阅）
 - `lark-listener agent-skills install|uninstall`
 
 ## 🚫 不要无人值守运行（会卡 stdin / 弹 GUI）

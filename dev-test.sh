@@ -17,7 +17,7 @@ set -uo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LARK_LISTENER_LABEL.plist"
 
-# 跑 CLI/import 用的 python：优先项目 .venv（editable，见 README 开发节），否则系统 python3。
+# 跑 CLI/import 用的 python：优先项目 .venv（editable，见 CLAUDE.md「三层策略」），否则系统 python3。
 if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
     PY="$PROJECT_DIR/.venv/bin/python"
 else
