@@ -200,18 +200,19 @@ from lark_listener.config_editor import ApplyResult
 def test_dispatch_summary_calls_poll(mock_poll, mock_parse, mock_reply, tmp_path):
     config_path, state_path = _write_cfg(tmp_path)
     mock_parse.return_value = Intent(type="summary", start_time=None)
-    main_mod._handle_message("汇总", "ou_anyone", config_path, state_path)
+    main_mod._handle_message("汇总", "ou_test", config_path, state_path)
     mock_poll.assert_called_once()
 
 
 @patch("lark_listener.main._reply_bot")
 @patch("lark_listener.main.intent.parse")
 def test_dispatch_config_rejects_non_owner(mock_parse, mock_reply, tmp_path):
+    """非 owner 在 intent.parse 之前即被静默忽略（不回复、不烧 AI）。"""
     config_path, state_path = _write_cfg(tmp_path)
     mock_parse.return_value = Intent(type="config_view")
     main_mod._handle_message("当前配置", "ou_stranger", config_path, state_path)
-    mock_reply.assert_called_once()
-    assert "仅本人" in mock_reply.call_args.args[1]
+    mock_reply.assert_not_called()
+    mock_parse.assert_not_called()
 
 
 @patch("lark_listener.main._reply_bot")
@@ -336,7 +337,7 @@ def test_reply_bot_swallows_errors(mock_run):
 def test_handle_message_reacts_on_summary(mock_poll, mock_parse, mock_reply, mock_react, tmp_path):
     config_path, state_path = _write_cfg(tmp_path)
     mock_parse.return_value = Intent(type="summary", start_time=None)
-    main_mod._handle_message("总结", "ou_anyone", config_path, state_path, "om_1")
+    main_mod._handle_message("总结", "ou_test", config_path, state_path, "om_1")
     mock_react.assert_called_once_with("om_1")
 
 
@@ -821,3 +822,80 @@ def test_poll_once_interval_positive_window_unchanged(MockFetcher, MockAnalyzer,
 
     start, end = mock_fetcher.fetch.call_args.args[:2]
     assert (end - start).total_seconds() == pytest.approx(60, abs=5)
+
+# --- review fixes (2026-06-10 全工程 review 高优先级 4 项) ---
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_notify_failure_still_advances_state(MockFetcher, MockAnalyzer, MockNotifier, mock_reply, tmp_path):
+    """notify 抛异常（如封套构建遇脏数据）不得阻断 state 推进——否则
+    last_poll_time 冻结，同一条毒消息每轮必炸，汇总永久中断。"""
+    mf = MockFetcher.return_value
+    mf.fetch.return_value = {
+        MessageCategory.P2P: [{"message_id": "m_poison"}],
+        MessageCategory.AT_ME: [], MessageCategory.KEYWORD: [], MessageCategory.AT_ALL: [],
+    }
+    mf.fetch_context.return_value = {}
+    MockAnalyzer.return_value.analyze.return_value = {}
+    MockNotifier.return_value.notify.side_effect = TypeError("chat_id is None")
+    config_path, state_path = _write_cfg(tmp_path)
+
+    poll_once(config_path, state_path)  # 必须不抛
+
+    with open(state_path) as f:
+        state = json.load(f)
+    assert state["last_poll_time"]
+    assert "m_poison" in state["processed_message_ids"]
+
+
+@patch("lark_listener.main._kill_stale_event_subscribers")
+@patch("lark_listener.main.time.sleep")
+@patch("lark_listener.main.subprocess.Popen")
+def test_bot_listener_does_not_pipe_stderr(mock_popen, mock_sleep, mock_kill):
+    """stderr 不能开 PIPE 又不读：lark-cli 长驻子进程写满 64KB 管道缓冲后
+    会阻塞在 stderr 写入，事件流静默冻结（bot 不再响应且无日志）。"""
+    proc = MagicMock()
+    proc.stdout = iter([])
+    mock_popen.return_value = proc
+    mock_sleep.side_effect = lambda *a: setattr(main_mod, "_running", False)
+
+    main_mod._running = True
+    try:
+        main_mod._bot_listener()
+    finally:
+        main_mod._running = True
+
+    import subprocess as _sp
+    assert mock_popen.call_args.kwargs["stderr"] != _sp.PIPE
+    assert mock_popen.call_args.kwargs["stderr"] == _sp.DEVNULL
+
+
+@patch("lark_listener.main.time.sleep")
+@patch("lark_listener.main.threading.Thread")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.load_config", side_effect=ValueError("配置缺少必填项: notify"))
+def test_run_bad_startup_config_no_crash_loop(mock_cfg, mock_reply, mock_thread, mock_sleep):
+    """启动期配置坏掉不得裸崩：launchd KeepAlive + ThrottleInterval=10 会进入
+    每 10 秒无限重启循环。必须捕获、慢退（sleep ≥ 60s）后才退出。"""
+    main_mod._running = True
+    main_mod.run()  # 必须不抛
+    assert mock_sleep.called
+    assert mock_sleep.call_args.args[0] >= 60
+
+
+@patch("lark_listener.main._add_reaction")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.intent.parse")
+@patch("lark_listener.main.poll_once")
+def test_handle_message_ignores_stranger_before_intent(mock_poll, mock_parse, mock_reply, mock_react, tmp_path):
+    """非 owner 消息在 intent.parse 之前就拦截：不烧 AI、不触发汇总、
+    不回复、不加表情（防陌生人刷 AI 配额/扰动汇总窗口）。"""
+    config_path, state_path = _write_cfg(tmp_path)
+    main_mod._handle_message("总结", "ou_stranger", config_path, state_path, "om_x")
+    mock_parse.assert_not_called()
+    mock_poll.assert_not_called()
+    mock_reply.assert_not_called()
+    mock_react.assert_not_called()

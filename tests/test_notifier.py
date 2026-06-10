@@ -379,6 +379,22 @@ def test_response_snippet_truncation():
     assert len(snippet) <= 83
 
 
+def test_response_handles_null_chat_id():
+    """脏数据兜底：消息 chat_id 为 null 时封套构建不得抛
+    （自动轮询路径上这类毒消息会冻结 last_poll_time）。"""
+    messages = {
+        MessageCategory.P2P: [],
+        MessageCategory.AT_ME: [_make_msg("m1", None, "ou_other", "某人", "@你 看下")],
+        MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
+    }
+    resp = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)
+    assert resp["code"] == 0
+    rows = resp["data"]["conversations"]
+    assert len(rows) == 1
+    assert rows[0]["chat_id"] == "unknown"
+
+
 def test_error_response_shape():
     resp = error_response("出错了")
     assert resp["code"] == 1
@@ -437,23 +453,65 @@ def test_card_style_finalized():
     assert any(h.startswith("🟧") for h in headers)
 
 
-def test_card_orig_column_is_snippet_link():
-    """原文列：消息片段本身就是跳转链接（点文字即跳原会话）。"""
+def test_card_two_columns_snippet_in_conv():
+    """只保留会话、摘要两列；原文片段并入会话列，名称冒号后直接接
+    带链接的“原文”（无换行），片段文字本身仍是跳转链接。"""
     resp = build_summary_response(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
     card = build_summary_card(resp)
+    for e in card["body"]["elements"]:
+        assert [col["name"] for col in e["columns"]] == ["conv", "summ"]
     rows = [r for e in card["body"]["elements"] for r in e["rows"]]
+    assert all(set(r) == {"conv", "summ"} for r in rows)
     p2p_row = next(r for r in rows if "张三" in r["conv"])
-    assert p2p_row["orig"].startswith("[“线上挂了”](")
-    assert "applink.feishu.cn" in p2p_row["orig"]
+    assert "：[“线上挂了”](" in p2p_row["conv"]
+    assert "applink.feishu.cn" in p2p_row["conv"]
+
+
+def test_card_conv_column_width_38_percent():
+    """消息（会话）列固定占 38% 宽度。"""
+    resp = build_summary_response(SAMPLE_MESSAGES, SAMPLE_ANALYSIS, "15:00", "15:30", MY_USER_ID)
+    card = build_summary_card(resp)
+    for e in card["body"]["elements"]:
+        assert e["columns"][0]["width"] == "38%"
+
+
+def test_card_snippet_shortened_around_keyword():
+    """卡片里原文最多 20 字：命中关键词时截取含关键词的片段，截断处补 ...；
+    无关键词时取开头 20 字。封套 snippet（80 字上限）不受影响。"""
+    long_head = "前缀" * 15                      # 30 字
+    content = long_head + "部署失败了请尽快处理" + "后缀" * 15
+    messages = {
+        MessageCategory.P2P: [
+            _make_msg("msg_l1", "oc_l1", "ou_a", "甲", "这是一条很长很长的开场白" * 5),
+        ],
+        MessageCategory.AT_ME: [],
+        MessageCategory.KEYWORD: [
+            _make_msg("msg_l2", "oc_l2", "ou_b", "乙", content,
+                      chat_name="发布群", matched_keyword="部署"),
+        ],
+        MessageCategory.AT_ALL: [],
+    }
+    card = build_summary_card(build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID))
+    rows = [r for e in card["body"]["elements"] for r in e["rows"]]
+
+    kw_row = next(r for r in rows if "发布群" in r["conv"])
+    excerpt = kw_row["conv"].split("[“")[1].split("”]")[0]
+    assert "部署" in excerpt                     # 关键词必须保留
+    assert excerpt.startswith("...") and excerpt.endswith("...")
+    assert len(excerpt.strip(".")) <= 20
+
+    p2p_row = next(r for r in rows if "甲" in r["conv"])
+    excerpt = p2p_row["conv"].split("[“")[1].split("”]")[0]
+    assert excerpt == "这是一条很长很长的开场白这是一条很长很长" + "..."
 
 
 def test_card_summary_dash_when_no_analysis():
-    """摘要列只放 AI 摘要，没有就是 —（snippet 不再顶进摘要列，留在原文列）。"""
+    """摘要列只放 AI 摘要，没有就是 —（snippet 不顶进摘要列，留在会话列）。"""
     resp = build_summary_response(SAMPLE_MESSAGES, {}, "15:00", "15:30", MY_USER_ID)
     card = build_summary_card(resp)
     rows = [r for e in card["body"]["elements"] for r in e["rows"]]
     assert all(r["summ"] == "—" for r in rows)
-    assert all(r["orig"].startswith("[“") for r in rows)
+    assert all("：[“" in r["conv"] for r in rows)
 
 
 # --- Notifier tests ---

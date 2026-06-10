@@ -33,7 +33,9 @@ def _group_by_chat(
     groups: dict[str, dict] = {}
     for cat, msgs in categorized.items():
         for msg in msgs:
-            chat_id = msg.get("chat_id", "unknown")
+            # `or` 而非 .get 默认值：真实数据见过 chat_id 显式为 null，
+            # None 流进 _conversation_row 的 chat_id[-8:] 会 TypeError。
+            chat_id = msg.get("chat_id") or "unknown"
             if chat_id not in groups:
                 groups[chat_id] = {
                     "chat_id": chat_id,
@@ -249,6 +251,22 @@ def build_summary_text(resp: dict[str, Any]) -> str:
     return "\n".join(sections).strip()
 
 
+def _short_snippet(snippet: str, keyword: str = "", limit: int = 20) -> str:
+    """卡片用短原文：最多 limit 字。命中关键词时截取含关键词的窗口（关键词
+    居中），否则取开头；被截掉的一侧补 ...。只影响卡片展示，封套
+    snippet（80 字上限）不变。"""
+    if len(snippet) <= limit:
+        return snippet
+    idx = snippet.find(keyword) if keyword else -1
+    if idx < 0:
+        return snippet[:limit] + "..."
+    start = max(0, min(idx - (limit - len(keyword)) // 2, len(snippet) - limit))
+    end = start + limit
+    head = "..." if start > 0 else ""
+    tail = "..." if end < len(snippet) else ""
+    return head + snippet[start:end] + tail
+
+
 def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Feishu interactive card (schema 2.0) rendered from the envelope.
 
@@ -262,18 +280,19 @@ def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
 
     # 样式定稿（2026-06-10 测试1-6 逐版与用户确认）：每分类一个表格、无分隔行；
     # 分类标题（emoji+数量）放进「会话」列表头；摘要列只放 AI 摘要（无则 —）；
-    # 原文列直接显示消息片段、文字本身即跳转链接；row_height auto 让长文换行。
+    # 仅两列：原文片段并入会话列（38% 宽），名称冒号后直接接“原文”，片段
+    # 经 _short_snippet 缩到 20 字内、文字本身即跳转链接；row_height auto 换行。
     elements: list[dict[str, Any]] = []
     for label, rows_src in section_rows:
         emoji = _CATEGORY_EMOJI.get(rows_src[0]["category"], "")
         table_rows = []
         for c in rows_src:
-            orig = (f"[“{c['snippet']}”]({c['link']})" if c["snippet"]
+            short = _short_snippet(c["snippet"], c.get("matched_keyword", ""))
+            orig = (f"[“{short}”]({c['link']})" if short
                     else f"[查看]({c['link']})")
             table_rows.append({
-                "conv": _title_md(c, icon=False),
+                "conv": f"{_title_md(c, icon=False)}：{orig}",
                 "summ": c["summary"] or "—",
-                "orig": orig,
             })
         elements.append({
             "tag": "table",
@@ -282,9 +301,8 @@ def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
             "header_style": {"text_align": "left", "background_style": "grey", "bold": True},
             "columns": [
                 {"name": "conv", "display_name": f"{emoji} {label}（{len(rows_src)}）",
-                 "data_type": "lark_md", "width": "auto"},
+                 "data_type": "lark_md", "width": "38%"},
                 {"name": "summ", "display_name": "摘要", "data_type": "lark_md", "width": "auto"},
-                {"name": "orig", "display_name": "原文", "data_type": "lark_md", "width": "auto"},
             ],
             "rows": table_rows,
         })

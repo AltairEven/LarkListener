@@ -47,6 +47,10 @@ MANUAL_WINDOW_CAP_SECONDS = 86400
 # 唤醒队列，必须定期醒来 reload 才能让「config set poll_interval 300」重新生效。
 IDLE_RELOAD_SECONDS = 600
 
+# 启动期配置加载失败时退出前的等待：把 launchd KeepAlive（ThrottleInterval=10）
+# 的崩溃重启循环从 10 秒级降到分钟级，避免刷爆 stderr.log。
+STARTUP_FAILURE_BACKOFF_SECONDS = 60
+
 
 def _reply_bot(user_id: str, text: str, markdown: bool = False):
     """Send a reply to the user via bot.
@@ -122,7 +126,9 @@ def _bot_listener():
                     "--force",
                 ),
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                # 不能 PIPE：循环只读 stdout，长驻子进程的 stderr 写满 64KB
+                # 管道缓冲后会阻塞，事件流静默冻结（bot 不再响应且无日志）。
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
             _listener_proc = proc
@@ -266,13 +272,19 @@ def poll_once(
         user_id=my_user_id,
         bot_chat_id=notify_cfg["bot_chat_id"],
     )
-    notifier.notify(
-        categorized,
-        analysis,
-        start.strftime("%m-%d %H:%M"),
-        end.strftime("%H:%M"),
-        my_user_id=my_user_id,
-    )
+    try:
+        notifier.notify(
+            categorized,
+            analysis,
+            start.strftime("%m-%d %H:%M"),
+            end.strftime("%H:%M"),
+            my_user_id=my_user_id,
+        )
+    except Exception:  # noqa: BLE001 — 脏数据兜底
+        # notify 内部发送已 best-effort，能抛到这里的是封套/卡片构建遇到脏数据
+        # （如 chat_id 为 null）。绝不能阻断下方 state 推进：否则 last_poll_time
+        # 冻结，同一条毒消息每轮重新拉取、每轮必炸，汇总永久中断且重启无法自愈。
+        logger.exception("Notify failed (dirty data?); advancing state anyway")
 
     # Update state only for regular polls (not custom time range)
     if not custom_start:
@@ -342,15 +354,22 @@ def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
 
 def _handle_message(content: str, sender_id: str, config_path: str, state_path: str,
                     message_id: str = ""):
-    """Dispatch a bot message: summary trigger, or owner-only config operation.
+    """Dispatch a bot message: summary trigger or config operation — owner only.
 
-    A "Get" reaction is added only once the message is determined actionable
-    (summary, or a config op from the owner) — not on receipt — so strangers and
-    non-actionable messages don't get a misleading acknowledgement.
+    Non-owner messages are dropped before intent parsing (no AI call, no reply).
+    A "Get" reaction is added only once the message is determined actionable —
+    not on receipt — so non-actionable messages don't get a misleading
+    acknowledgement.
     """
     global _pending_change
     config = load_config(config_path)
     my_user_id = config["notify"]["user_id"]
+    # 身份检查必须在 intent.parse 之前：parse 会打一次 AI，否则任何能私聊
+    # bot 的租户内用户都能刷 owner 的 AI 配额、触发汇总扰动轮询窗口。
+    # 静默忽略（不回复）——回复本身也是可被刷的出口。
+    if sender_id != my_user_id:
+        logger.info("Ignoring message from non-owner: %s", sender_id or "unknown")
+        return
     parsed = intent.parse(content, config)
 
     if parsed.type == "summary":
@@ -373,15 +392,8 @@ def _handle_message(content: str, sender_id: str, config_path: str, state_path: 
             _reply_bot(sender_id, "🤔 没太听懂，发「帮助」可查看用法。")
         return
 
-    # Remaining types are config operations — owner only.
-    if sender_id != my_user_id:
-        if sender_id:
-            _reply_bot(sender_id, "⚠️ 仅本人可查看或修改配置")
-        else:
-            logger.info("Config op from unknown sender ignored")
-        return
-
-    # Owner-authorised config op → acknowledge with a reaction before processing.
+    # Remaining types are config operations（owner 身份已在 intent.parse 前校验）.
+    # Acknowledge with a reaction before processing.
     if message_id:
         _add_reaction(message_id)
 
@@ -478,7 +490,19 @@ def run():
     logger.info("LarkListener starting...")
 
     # Load config for user_id
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except Exception:  # noqa: BLE001
+        # 启动期配置坏掉（手编损坏/缺必填项）绝不能裸崩：launchd KeepAlive +
+        # ThrottleInterval=10 会进入每 10 秒无限重启循环刷爆日志。慢退后再退出，
+        # 把重启频率降到分钟级，等用户按 doctor 指引修复。
+        logger.exception(
+            "启动失败：配置无法加载（%s）。请修复后再 start，可运行 "
+            "`lark-listener doctor` 查看具体问题。%d 秒后退出等待重启。",
+            config_path, STARTUP_FAILURE_BACKOFF_SECONDS,
+        )
+        time.sleep(STARTUP_FAILURE_BACKOFF_SECONDS)
+        return
     # Pin every lark-cli call to the configured bot before the listener thread
     # starts or any startup message is sent.
     set_lark_profile(config.get("lark_cli_appid"))

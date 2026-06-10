@@ -12,11 +12,14 @@ def test_ai_packages_for_maps_backend_to_sdk():
 
 
 @patch("lark_listener.setup_wizard.subprocess.run")
-def test_pip_install_ai_installs_into_venv_python(mock_run):
+def test_pip_install_ai_falls_back_to_sys_executable(mock_run, tmp_path, monkeypatch):
+    """服务 venv 不存在时回退当前解释器。必须把 VENV_DIR 指到不存在的路径——
+    否则本机装有生产 venv（~/.lark_listener/venv）时该测试会环境性失败。"""
+    monkeypatch.setattr(setup_wizard.service, "VENV_DIR", tmp_path / "no-venv")
     mock_run.return_value = MagicMock(returncode=0)
     setup_wizard._pip_install_ai("claude")
     argv = mock_run.call_args[0][0]
-    assert argv[0] == sys.executable          # 装进当前 venv 的 python
+    assert argv[0] == sys.executable
     assert argv[1:4] == ["-m", "pip", "install"]
     assert "anthropic>=0.30.0" in argv
 
