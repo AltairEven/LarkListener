@@ -17,8 +17,12 @@ lark-listener summarize --start $(date -v-30M +%s) --end $(date +%s) --quiet
 # 「最近 2 小时」用 -v-2H，「最近 1 天」用 -v-1d，以此类推
 ```
 - `--start` / `--end` 均必填，**Unix 秒时间戳**；「最近 N 分钟/小时」= `date -v-NM/-NH +%s` 算起点、`date +%s` 算终点。
-- 你（AI）自己要拿结果看就加 `--quiet`（只回 stdout，不打扰用户飞书）；想让用户也在飞书收到，就去掉 `--quiet`。
-- 只读：不写 state、不影响正在跑的定时轮询，可随时跑。退出码 0 成功（含无消息）/ 非 0 出错。
+- **stdout 是统一 JSON 封套 `{code, errorMsg, data}`**（成功/空/错误都是合法 JSON，退出码＝`code`）：
+  - `code: 0` 成功，`data.conversations` 为会话数组（空数组＝该时间窗没有可汇总内容）；
+  - `code != 0` 出错，看 `errorMsg`。**先 `json.loads` 再判 `code`，不要把 stdout 当人读文本转发**；
+    给用户转述时用 `data` 里的 `title`/`summary`/`snippet`/`link` 自行组织。
+- 你（AI）自己要拿结果看就加 `--quiet`（只回 stdout，不打扰用户飞书）；想让用户也在飞书收到，就去掉 `--quiet`（推飞书交互卡片）。
+- 只读：不写 state、不影响正在跑的定时轮询，可随时跑。
 
 ## 先诊断
 排查任何问题，先跑（机读）：
@@ -29,12 +33,14 @@ lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上
 `doctor` 每项带 `fix` 字段，直接给修复命令。退出码：status 0=运行/3=停/4=未装；doctor 0=全过/1=有 fail。
 
 ## ✅ 可直接（非交互）运行
-- `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — 按需汇总某时间窗到 stdout（见上「按需汇总」）
+- `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — 按需汇总某时间窗，stdout 为 JSON 封套（见上「按需汇总」）
 - `lark-listener start | stop | restart` — 服务控制
 - `lark-listener status [--json]` / `lark-listener doctor [--json] [--deep]`
 - `lark-listener config get [KEY] [--json]` — 查看配置（api_key 已脱敏）
-- `lark-listener config set KEY VALUE [--add|--remove] [--force]` — 改配置，下次轮询生效（不重启）
+- `lark-listener config set KEY VALUE [--add|--remove] [--force]` — 改配置，无需重启：
+  轮询开启时下次轮询生效；`poll_interval=0`（自动轮询已关闭）时最迟约 10 分钟被服务感知
   - 点号路径：`poll_interval`、`keywords`、`ai.model`、`notify.user_id`、`lark_cli_appid` 等
+  - `poll_interval` 为非负整数秒，**0 = 关闭自动轮询**（服务保持在线，仅 bot 按需汇总/改配置）
   - 列表：整体 `config set keywords a,b`；增 `--add`；减 `--remove`
   - 受保护项（`ai`/`notify`/`lark_cli_appid`）需 `--force`
 - `lark-listener agent-skills install|uninstall`

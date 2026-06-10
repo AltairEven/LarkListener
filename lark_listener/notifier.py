@@ -22,13 +22,6 @@ def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-URGENCY_ICON = {
-    "urgent": "🔴",
-    "normal": "",
-    "low": "",
-}
-
-
 def _chat_link(chat_id: str) -> str:
     return f"https://applink.feishu.cn/client/chat/open?openChatId={chat_id}"
 
@@ -51,129 +44,259 @@ def _group_by_chat(
                 }
             groups[chat_id]["messages"].append(msg)
             # Capture the group name (p2p partner name is resolved later in
-            # _format_conversation directly from the messages).
+            # _conversation_row directly from the messages).
             if cat != MessageCategory.P2P and msg.get("chat_name"):
                 groups[chat_id]["chat_name"] = msg["chat_name"]
     return groups
 
 
-def _format_conversation(
+# Category render order, shared by the unified response, the card, and the
+# Markdown fallback so every consumer sees the same sectioning.
+_CATEGORY_ORDER = [
+    (MessageCategory.P2P, "私聊消息"),
+    (MessageCategory.AT_ME, "@我"),
+    (MessageCategory.KEYWORD, "关键词命中"),
+    (MessageCategory.AT_ALL, "@所有人"),
+]
+
+# 卡片表头用彩色方块区分分类（飞书 table 表头背景实测只支持 none/grey，
+# blue/green 等色值 API 收下但静默回退灰色，故用 emoji 实现颜色区分）。
+_CATEGORY_EMOJI = {
+    "p2p": "🟦",
+    "at_me": "🟩",
+    "keyword": "🟧",
+    "at_all": "🟥",
+}
+
+
+def _partner_title(msgs: list[dict[str, Any]], my_user_id: str) -> str:
+    """p2p 会话标题＝对方名字。优先取**有名字**的非我发送者——机器人（app）
+    发送者的消息天然无 sender.name（由 fetcher 经应用信息 API 尽力补齐，
+    需 admin:app.info:readonly 权限）；全员无名时 app 对端给可读回退
+    「机器人(尾号)」，而不是「未知」。"""
+    fallback = ""
+    for m in msgs:
+        s = m.get("sender", {})
+        if s.get("id", "") == my_user_id:
+            continue
+        if s.get("name"):
+            return s["name"]
+        if not fallback:
+            if s.get("sender_type") == "app" or s.get("id_type") == "app_id":
+                sid = s.get("id", "")
+                fallback = f"机器人({sid[-8:]})" if sid else "机器人"
+            else:
+                fallback = "未知"
+    return fallback or "私聊"
+
+
+def _conversation_row(
     group: dict,
-    analysis: Optional[ConversationAnalysis],
+    label: str,
+    analysis: dict[str, ConversationAnalysis],
     my_user_id: str,
-) -> str:
-    """Format a single conversation group as markdown."""
+) -> dict[str, Any]:
+    """Distill one chat group into a plain, JSON-serializable conversation row.
+
+    This is where the per-conversation logic lives (partner-name resolution,
+    relevant-message selection, snippet truncation). Card / Markdown / stdout
+    all consume these rows so they never diverge.
+    """
     cat = group["category"]
     chat_id = group["chat_id"]
     msgs = sorted(group["messages"], key=lambda m: m.get("create_time", ""))
-    link = _chat_link(chat_id)
 
-    # Header: person name (p2p) or group name
-    if cat == MessageCategory.P2P:
-        # Find the other person's name
-        partner = ""
-        for m in msgs:
-            sender_id = m.get("sender", {}).get("id", "")
-            if sender_id != my_user_id:
-                partner = m.get("sender", {}).get("name", "未知")
-                break
-        title = partner or "私聊"
+    # p2p 会话（含关键词搜索捞进非 P2P 分类的 p2p 消息——关键词搜索没有
+    # chat-type 过滤）一律走对端名解析；p2p 会话对象本身无名称属性，
+    # 「群聊(尾号)」对它永远是错的。
+    is_p2p_chat = cat == MessageCategory.P2P or (
+        not group.get("chat_name") and msgs and msgs[0].get("chat_type") == "p2p"
+    )
+    if is_p2p_chat:
+        title = _partner_title(msgs, my_user_id)
     else:
         title = group.get("chat_name") or f"群聊({chat_id[-8:]})"
 
-    urgency_icon = ""
-    if analysis and analysis.urgency == "urgent":
-        urgency_icon = "🔴 "
+    ar = analysis.get(chat_id)
 
-    # Find the most relevant message (from AI), fallback to last non-self message
-    display_content = ""
-    if analysis and analysis.relevant_message_id:
+    # Snippet: AI's most-relevant message, else last non-self message.
+    snippet = ""
+    if ar and ar.relevant_message_id:
         for m in msgs:
-            if m.get("message_id") == analysis.relevant_message_id:
-                display_content = format_msg_content(m, for_display=True)
+            if m.get("message_id") == ar.relevant_message_id:
+                snippet = format_msg_content(m, for_display=True)
                 break
-    if not display_content:
+    if not snippet:
         for m in reversed(msgs):
-            sender_id = m.get("sender", {}).get("id", "")
-            if sender_id != my_user_id:
-                display_content = format_msg_content(m, for_display=True)
+            if m.get("sender", {}).get("id", "") != my_user_id:
+                snippet = format_msg_content(m, for_display=True)
                 break
-    if len(display_content) > 80:
-        display_content = display_content[:80] + "..."
+    if len(snippet) > 80:
+        snippet = snippet[:80] + "..."
 
-    # Title bold, content not bold, keyword hint outside bold
-    if cat == MessageCategory.KEYWORD and group.get("matched_keyword"):
-        name_part = f"{urgency_icon}**{title}**（命中：{group['matched_keyword']}）"
-    else:
-        name_part = f"{urgency_icon}**{title}**"
-
-    header = f"{name_part}：\u201c{display_content}\u201d [查看原文]({link})"
-
-    # AI analysis in italic
-    ai_line = ""
-    if analysis and analysis.summary:
-        ai_line = f"*💡 {analysis.summary}*"
-
-    parts = [header]
-    if ai_line:
-        parts.append(ai_line)
-
-    return "\n".join(parts)
+    return {
+        "category": cat.value,
+        "label": label,
+        "title": title,
+        "chat_id": chat_id,
+        "link": _chat_link(chat_id),
+        "urgency": ar.urgency if ar else "normal",
+        "relevance": ar.relevance if ar else "medium",
+        "matched_keyword": group.get("matched_keyword", "") if cat == MessageCategory.KEYWORD else "",
+        "summary": (ar.summary if ar and ar.summary else ""),
+        "snippet": snippet,
+        "count": len(group["messages"]),
+    }
 
 
-def build_summary_text(
+def build_summary_response(
     categorized: dict[MessageCategory, list[dict[str, Any]]],
     analysis: dict[str, ConversationAnalysis],
     start_time: str,
     end_time: str,
     my_user_id: str = "",
-) -> str:
+) -> dict[str, Any]:
+    """Unified response envelope `{code, errorMsg, data}` — the single source of
+    truth every output (stdout JSON, bot card, Markdown fallback) derives from.
+
+    Success is always code 0; an empty/all-self window yields conversations: [].
+    """
     groups = _group_by_chat(categorized)
-    if not groups:
-        return ""
+    has_others = any(
+        m.get("sender", {}).get("id", "") != my_user_id
+        for g in groups.values()
+        for m in g["messages"]
+    )
 
-    # Check if there are any non-self messages
-    has_others = False
-    for g in groups.values():
-        for m in g["messages"]:
-            if m.get("sender", {}).get("id", "") != my_user_id:
-                has_others = True
-                break
-        if has_others:
-            break
-    if not has_others:
-        return ""
+    conversations: list[dict[str, Any]] = []
+    if has_others:
+        for cat, label in _CATEGORY_ORDER:
+            cat_groups = [g for g in groups.values() if g["category"] == cat]
+            # Urgent conversations first within each category.
+            cat_groups.sort(
+                key=lambda g: 0 if analysis.get(g["chat_id"]) and analysis[g["chat_id"]].urgency == "urgent" else 1,
+            )
+            for group in cat_groups:
+                conversations.append(_conversation_row(group, label, analysis, my_user_id))
 
+    return {
+        "code": 0,
+        "errorMsg": "",
+        "data": {
+            "period": {"start": start_time, "end": end_time},
+            "conversations": conversations,
+        },
+    }
+
+
+def error_response(msg: str, code: int = 1) -> dict[str, Any]:
+    """Error envelope mirroring the command exit code."""
+    return {"code": code, "errorMsg": msg, "data": None}
+
+
+def _title_md(c: dict[str, Any], icon: bool = True) -> str:
+    """会话标题（加粗+命中提示，可选紧急图标）。卡片与 Markdown 回退共用。
+    卡片定稿（2026-06-10 与用户逐版确认）会话列不带 emoji（icon=False），
+    紧急只体现在类内排序；Markdown 回退保留 🔴（既有样式）。
+    matched_keyword 由 _conversation_row 保证仅 keyword 类别非空，无需再查类别。"""
+    prefix = "🔴 " if icon and c["urgency"] == "urgent" else ""
+    kw = f"（命中：{c['matched_keyword']}）" if c.get("matched_keyword") else ""
+    return f"{prefix}**{c['title']}**{kw}"
+
+
+def _envelope_sections(resp: Optional[dict[str, Any]]):
+    """解析封套并按 _CATEGORY_ORDER 切段——卡片与 Markdown 回退共用的唯一入口。
+    错误/空封套 → None；否则 (period, [(label, rows), …])，rows 非空。"""
+    if not resp or resp.get("code") != 0:
+        return None
+    data = resp.get("data") or {}
+    conversations = data.get("conversations") or []
+    if not conversations:
+        return None
     sections = []
-    sections.append(f"📬 **LarkListener 消息汇总（{start_time} - {end_time}）**\n")
+    for cat, label in _CATEGORY_ORDER:
+        rows = [c for c in conversations if c["category"] == cat.value]
+        if rows:
+            sections.append((label, rows))
+    return data.get("period", {}), sections
 
-    category_config = [
-        (MessageCategory.P2P, "私聊消息"),
-        (MessageCategory.AT_ME, "@我"),
-        (MessageCategory.KEYWORD, "关键词命中"),
-        (MessageCategory.AT_ALL, "@所有人"),
-    ]
+
+def _render_conversation_md(c: dict[str, Any]) -> str:
+    header = f"{_title_md(c)}：“{c['snippet']}” [查看原文]({c['link']})"
+    parts = [header]
+    if c["summary"]:
+        parts.append(f"*💡 {c['summary']}*")
+    return "\n".join(parts)
+
+
+def build_summary_text(resp: dict[str, Any]) -> str:
+    """Markdown fallback rendered from the unified envelope (used when the card
+    send fails). Empty/error envelope -> empty string."""
+    parsed = _envelope_sections(resp)
+    if parsed is None:
+        return ""
+    period, section_rows = parsed
+    sections = [f"📬 **LarkListener 消息汇总（{period.get('start', '')} - {period.get('end', '')}）**\n"]
 
     rendered_sections = []
-    for cat, label in category_config:
-        cat_groups = [g for g in groups.values() if g["category"] == cat]
-        if not cat_groups:
-            continue
-
-        # Sort: urgent conversations first
-        cat_groups.sort(
-            key=lambda g: 0 if analysis.get(g["chat_id"]) and analysis[g["chat_id"]].urgency == "urgent" else 1,
-        )
-
-        lines = [f"**━━ {label}（{len(cat_groups)} 个会话）━━**"]
-        for group in cat_groups:
-            ar = analysis.get(group["chat_id"])
-            lines.append(_format_conversation(group, ar, my_user_id))
+    for label, rows in section_rows:
+        lines = [f"**━━ {label}（{len(rows)} 个会话）━━**"]
+        for c in rows:
+            lines.append(_render_conversation_md(c))
         rendered_sections.append("\n\n".join(lines))
 
     sections.append("\n\n---\n\n".join(rendered_sections))
-
     return "\n".join(sections).strip()
+
+
+def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Feishu interactive card (schema 2.0) rendered from the envelope.
+
+    Returns None when there is nothing to show (error envelope or no
+    conversations) so the caller simply skips sending.
+    """
+    parsed = _envelope_sections(resp)
+    if parsed is None:
+        return None
+    period, section_rows = parsed
+
+    # 样式定稿（2026-06-10 测试1-6 逐版与用户确认）：每分类一个表格、无分隔行；
+    # 分类标题（emoji+数量）放进「会话」列表头；摘要列只放 AI 摘要（无则 —）；
+    # 原文列直接显示消息片段、文字本身即跳转链接；row_height auto 让长文换行。
+    elements: list[dict[str, Any]] = []
+    for label, rows_src in section_rows:
+        emoji = _CATEGORY_EMOJI.get(rows_src[0]["category"], "")
+        table_rows = []
+        for c in rows_src:
+            orig = (f"[“{c['snippet']}”]({c['link']})" if c["snippet"]
+                    else f"[查看]({c['link']})")
+            table_rows.append({
+                "conv": _title_md(c, icon=False),
+                "summ": c["summary"] or "—",
+                "orig": orig,
+            })
+        elements.append({
+            "tag": "table",
+            "page_size": 10,
+            "row_height": "auto",
+            "header_style": {"text_align": "left", "background_style": "grey", "bold": True},
+            "columns": [
+                {"name": "conv", "display_name": f"{emoji} {label}（{len(rows_src)}）",
+                 "data_type": "lark_md", "width": "auto"},
+                {"name": "summ", "display_name": "摘要", "data_type": "lark_md", "width": "auto"},
+                {"name": "orig", "display_name": "原文", "data_type": "lark_md", "width": "auto"},
+            ],
+            "rows": table_rows,
+        })
+
+    return {
+        "schema": "2.0",
+        # spike 实测（2026-06-10 真发 DM）：2.0 + wide_screen_mode + table/lark_md
+        # 这套组合被 API 接受且渲染正常，改 schema 前需重新真发验证。
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"📬 消息汇总（{period.get('start', '')} - {period.get('end', '')}）"}},
+        "body": {"elements": elements},
+    }
 
 
 class Notifier:
@@ -188,29 +311,53 @@ class Notifier:
         start_time: str,
         end_time: str,
         my_user_id: str = "",
+        resp: Optional[dict[str, Any]] = None,
     ):
-        text = build_summary_text(categorized, analysis, start_time, end_time, my_user_id)
-        if not text:
-            return
+        # 调用方已持有封套时直接传入（cmd_summarize），保证 stdout 与推送同源、
+        # 不重建；poll_once 仍按原签名调用，这里兜底构建。
+        if resp is None:
+            resp = build_summary_response(categorized, analysis, start_time, end_time, my_user_id)
+        card = build_summary_card(resp)
+        if card is None:
+            return  # nothing worth sending
 
-        self._send_bot_message(text)
+        # Primary: interactive card with table. Fallback: Markdown text — some
+        # tenants may not render the table component; a readable message beats none.
+        if not self._send_bot_card(card):
+            self._send_bot_message(build_summary_text(resp))
         self._send_macos_notification(categorized, my_user_id)
 
-    def _send_bot_message(self, markdown: str):
+    def _send_im(self, *payload: str) -> bool:
+        """Shared bot-DM send pipeline. Returns True on success.
+
+        Best-effort: a failed send (lark-cli missing, timeout, network, rc!=0)
+        must NOT propagate — it would abort poll_once before the caller advances
+        last_poll_time, freezing the start time and re-pushing the same summary
+        every cycle. Losing one message is better than a duplicate loop."""
         cmd = lark_cli(
             "im", "+messages-send",
             "--user-id", self.user_id,
-            "--markdown", markdown,
+            *payload,
             "--as", "bot",
         )
-        # Best-effort: a failed send (lark-cli missing, timeout, network) must NOT
-        # propagate — it would abort poll_once before the caller advances
-        # last_poll_time, freezing the start time and re-pushing the same summary
-        # every cycle. Losing one toast is better than a duplicate-notification loop.
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         except Exception as e:
-            logger.warning("Bot summary message failed to send (%s).", e)
+            logger.warning("Bot message failed to send (%s).", e)
+            return False
+        if result.returncode != 0:
+            logger.warning("Bot message rejected (rc=%s): %s",
+                           result.returncode, (result.stderr or "").strip()[:200])
+            return False
+        return True
+
+    def _send_bot_card(self, card: dict[str, Any]) -> bool:
+        """Send the summary as an interactive card; False → caller falls back to Markdown."""
+        return self._send_im("--content", json.dumps(card, ensure_ascii=False),
+                             "--msg-type", "interactive")
+
+    def _send_bot_message(self, markdown: str):
+        self._send_im("--markdown", markdown)
 
     def _send_macos_notification(
         self,

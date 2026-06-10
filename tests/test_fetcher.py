@@ -557,3 +557,62 @@ def test_fetch_context_keeps_latest_after_sorting(mock_run):
     # Excludes m_match; of [a(300), c(900), b(100)] the latest 2 are a and c
     ids = [m["message_id"] for m in context["oc_x"]]
     assert ids == ["a", "c"]
+
+
+# --- 机器人应用名解析（应用信息 API，2026-06-10 调试定案）---
+
+import lark_listener.fetcher as fetcher_mod
+from lark_listener.fetcher import Fetcher as _Fetcher
+
+
+def _app_name_ok(name):
+    m = MagicMock()
+    m.returncode = 0
+    m.stdout = f'"{name}"\n'
+    return m
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_get_app_name_builds_api_command_and_caches(mock_run):
+    fetcher_mod._APP_NAME_CACHE.clear()
+    mock_run.return_value = _app_name_ok("SDK专家")
+    f = _Fetcher()
+    assert f._get_app_name("cli_abc") == "SDK专家"
+    args = mock_run.call_args[0][0]
+    assert "api" in args and "get" in args
+    assert "/open-apis/application/v6/applications/cli_abc" in args
+    assert "--params" in args  # lang 必填，1.0.50 起经 --params 传 query
+    assert "bot" in args       # 仅 tenant_access_token 可调
+    # 命中模块级缓存：第二次（哪怕新实例）不再起 subprocess
+    f2 = _Fetcher()
+    assert f2._get_app_name("cli_abc") == "SDK专家"
+    assert mock_run.call_count == 1
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_get_app_name_failure_returns_none_no_retry_within_poll(mock_run):
+    """权限未批（210508）等失败 → None 且本实例内不重试；绝不抛。"""
+    fetcher_mod._APP_NAME_CACHE.clear()
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="210508")
+    f = _Fetcher()
+    assert f._get_app_name("cli_denied") is None
+    assert f._get_app_name("cli_denied") is None
+    assert mock_run.call_count == 1  # 实例级失败缓存，本轮不重复打
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fill_app_sender_names_sets_name_on_app_senders(mock_run):
+    fetcher_mod._APP_NAME_CACHE.clear()
+    mock_run.return_value = _app_name_ok("文档助手")
+    f = _Fetcher()
+    result = {cat: [] for cat in MessageCategory}
+    result[MessageCategory.P2P] = [
+        {"message_id": "m1", "chat_id": "oc_b", "chat_type": "p2p",
+         "sender": {"id": "cli_doc", "id_type": "app_id", "sender_type": "app"}},
+        {"message_id": "m2", "chat_id": "oc_h", "chat_type": "p2p",
+         "sender": {"id": "ou_x", "name": "张三"}},  # 人类发送者不动
+    ]
+    f._fill_app_sender_names(result)
+    assert result[MessageCategory.P2P][0]["sender"]["name"] == "文档助手"
+    assert result[MessageCategory.P2P][1]["sender"]["name"] == "张三"
+    assert mock_run.call_count == 1  # 只为 app 发送者查询

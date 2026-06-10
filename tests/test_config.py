@@ -137,3 +137,23 @@ notify:
 
     assert config["keywords"] == []
     assert config["exclude_chat_ids"] == []
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("poll_interval: 0", 0),          # 0 = 关闭自动轮询，合法
+    ("poll_interval:", 300),          # null → 回退默认
+    ('poll_interval: "120"', 120),    # 带引号的数字 → 容错转 int
+    ("poll_interval: abc", 300),      # 垃圾 → 回退默认
+    ("poll_interval: -300", 0),       # 负数 → 按 0（关闭）处理
+    ("poll_interval: true", 300),     # bool → 非法，回退默认
+])
+def test_load_config_clamps_poll_interval(tmp_path, raw, expected):
+    """poll_interval 在 load_config 咽喉钳制为非负 int：run 循环/_poll_wait_timeout/
+    doctor/poll_once 都对它做数值比较，坏配置绝不能让服务 TypeError 崩进
+    launchd KeepAlive 重启循环。"""
+    content = SAMPLE_CONFIG.replace("poll_interval: 120", raw)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(content)
+    config = load_config(str(config_file))
+    assert config["poll_interval"] == expected
+    assert isinstance(config["poll_interval"], int)

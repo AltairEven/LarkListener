@@ -10,14 +10,14 @@
 
 | 模块 | 职责 |
 |---|---|
-| `main.py` | `main()` argparse 分发器（子命令均返回退出码经 `sys.exit`：status/doctor/config get-set/summarize/agent-skills/start/stop/restart/…）；`run()` 守护循环；`poll_once`/`_handle_message`/`_bot_listener` 守护逻辑；`_fetch_window`/`_analyze_window`（poll_once 与 summarize 共用的「产出」核心）；`cmd_summarize`（按需汇总→stdout，默认也推飞书） |
+| `main.py` | `main()` argparse 分发器（子命令均返回退出码经 `sys.exit`：status/doctor/config get-set/summarize/agent-skills/start/stop/restart/…）；`run()` 守护循环（`poll_interval=0`=关自动轮询：跳过 poll_once、等待用有界超时 `IDLE_RELOAD_SECONDS` 定期 reload 配置）；`poll_once`/`_handle_message`/`_bot_listener` 守护逻辑（interval<=0 时手动汇总窗口回溯 30min/封顶 24h）；`_fetch_window`/`_analyze_window`（poll_once 与 summarize 共用的「产出」核心）；`cmd_summarize`（按需汇总→stdout 输出统一封套 `{code,errorMsg,data}` JSON，退出码=code，默认也推飞书卡片） |
 | `service.py` | launchd 管理：`shim_path`/`node_bin_dir`/`build_plist`/`stop_service`/`ensure_shim_link`；`collect_status`（机读状态 dict）+ `cmd_start/stop/restart/status/config/uninstall`（均返回退出码；`cmd_uninstall` 兼清理 agent skill，dev 隔离态跳过） |
 | `setup_wizard.py` | 交互安装向导 `cmd_setup`；纯函数 `build_config_dict`/`write_config_file`/`ai_packages_for`/`_pip_install_ai` |
 | `analyzer.py` / `intent.py` | 调 AI（**延迟 import** anthropic/openai；ollama 走标准库 urllib） |
 | `fetcher.py` | 调 `lark-cli` 搜消息、取上下文 |
 | `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`（被 main/fetcher/notifier/setup 依赖） |
-| `notifier.py` | Bot 消息 + macOS 通知（osascript 默认，terminal-notifier 可选） |
-| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify` 受保护不可经 bot 改） |
+| `notifier.py` | 统一封套唯一事实源 `build_summary_response`/`error_response`；卡片 `build_summary_card`（飞书 table 卡片，2026-06-10 真发逐版定稿：分类 emoji+数量入表头、会话列纯名称无🔴、摘要列仅 AI 摘要、原文列=带链接消息片段、row_height auto；表头背景实测仅支持 none/grey）→ 失败回退 `build_summary_text`（Markdown，保留🔴 既有样式）；`Notifier.notify(…, resp=None)` 可直接消费调用方已建封套；macOS 通知（osascript 默认，terminal-notifier 可选） |
+| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify` 受保护不可经 bot 改）；`load_config` 钳制 `poll_interval` 为非负 int（null/字符串/负数等坏值绝不让消费点 TypeError 崩进 KeepAlive 重启循环） |
 | `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend`（浅检零副作用；`--deep` 真打最小请求）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
 | `config_cli.py` | `config get/set` 非交互：点号路径、列表增/减/整体替换、`--force` 放行受保护键、写后 `_validate` 失败回滚、api_key 脱敏；只复用 `config_editor` 底层（不复用其 bot 调度） |
 | `agent_adapters.py` | 可插拔 adapter 注册表 + `ClaudeCodeAdapter`（装/卸 `~/.claude/skills/lark-listener` 操作 skill，包内资源经 importlib.resources 读）；`install/uninstall_agent_skills`（best-effort） |

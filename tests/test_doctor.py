@@ -35,6 +35,15 @@ def test_check_last_poll_stale():
     assert doctor.check_last_poll({"last_poll_time": None}, 300, now=now).status == "warn"
 
 
+def test_check_last_poll_skips_when_auto_poll_disabled():
+    # poll_interval=0 关闭自动轮询：再陈旧的 last_poll 也不该报 warn
+    now = datetime(2026, 6, 9, 12, 0, tzinfo=TZ)
+    stale = {"last_poll_time": "2020-01-01T00:00:00+08:00"}
+    c = doctor.check_last_poll(stale, 0, now=now)
+    assert c.status == "ok"
+    assert "自动轮询已关闭" in c.detail
+
+
 def test_check_ai_backend_shallow_missing_model(monkeypatch):
     monkeypatch.setattr(doctor, "_sdk_installed", lambda name: True)
     cfg = {"ai": {"provider": "claude", "model": "", "api_key": "k"}}
