@@ -18,7 +18,7 @@ from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
 from lark_listener.config import load_config
 from lark_listener.fetcher import Fetcher, MessageCategory
-from lark_listener.notifier import Notifier, build_summary_text
+from lark_listener.notifier import Notifier, build_summary_response, error_response
 from lark_listener.state import State
 
 TZ = timezone(timedelta(hours=8))
@@ -37,6 +37,15 @@ _pending_change: Optional[dict] = None
 
 # 连续轮询出错达到此阈值即告警（见 _note_poll_error）。
 MAX_ERRORS = 3
+
+# 自动轮询关闭（poll_interval<=0）时手动「汇总」的窗口兜底（见 poll_once）：
+# 无 last_poll_time 基准则回溯 30 分钟；基准太旧则封顶 24 小时。
+MANUAL_LOOKBACK_SECONDS = 1800
+MANUAL_WINDOW_CAP_SECONDS = 86400
+
+# 自动轮询关闭时主循环的等待上限：config_cli 从另一进程改写 config.yaml 无法
+# 唤醒队列，必须定期醒来 reload 才能让「config set poll_interval 300」重新生效。
+IDLE_RELOAD_SECONDS = 600
 
 
 def _reply_bot(user_id: str, text: str, markdown: bool = False):
@@ -216,10 +225,17 @@ def poll_once(
     state = State(state_path)
 
     now = datetime.now(TZ)
+    interval = config["poll_interval"]
     if custom_start:
         start = custom_start
+    elif interval > 0:
+        start = state.last_poll_time or (now - timedelta(seconds=interval))
     else:
-        start = state.last_poll_time or (now - timedelta(seconds=config["poll_interval"]))
+        # 自动轮询关闭（interval<=0）时，手动「汇总」的窗口不能再用 interval 兜底
+        # （回溯 0 秒＝零宽窗口必然为空）：无基准则回溯 30 分钟；有基准但太旧
+        # （如刚从轮询模式切过来）则封顶 24h，防止一次拉取数周消息爆 AI 成本。
+        start = state.last_poll_time or (now - timedelta(seconds=MANUAL_LOOKBACK_SECONDS))
+        start = max(start, now - timedelta(seconds=MANUAL_WINDOW_CAP_SECONDS))
     end = now
 
     notify_cfg = config["notify"]
@@ -270,24 +286,30 @@ def poll_once(
     logger.info("Summary sent successfully")
 
 
+def _emit_response(resp: dict) -> int:
+    """Print the unified envelope as JSON to stdout and return its code as the
+    command exit code. stdout stays pure JSON so AI agents can always parse it;
+    human-facing notes (e.g. push failures) go to stderr."""
+    print(json.dumps(resp, ensure_ascii=False, indent=2))
+    return resp["code"]
+
+
 def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
-    """按需汇总 [start_ts, end_ts]（Unix 秒）内的消息到 stdout。
-    默认也推飞书 DM + 桌面通知；--quiet 只回 stdout。只读，不碰 state。"""
+    """按需汇总 [start_ts, end_ts]（Unix 秒）内的消息。
+    stdout 一律输出统一封套 {code, errorMsg, data}（成功/空/错误都是合法 JSON，
+    退出码＝code）；默认也推飞书 DM + 桌面通知（卡片），--quiet 只回 stdout。只读，不碰 state。"""
     if start_ts >= end_ts:
-        print("❌ --start 必须早于 --end")
-        return 1
+        return _emit_response(error_response("--start 必须早于 --end"))
     try:
         config = load_config()
     except Exception as e:  # noqa: BLE001
-        print(f"❌ 读取配置失败：{e}")
-        return 1
+        return _emit_response(error_response(f"读取配置失败：{e}"))
     set_lark_profile(config.get("lark_cli_appid"))
     try:
         start = datetime.fromtimestamp(start_ts, TZ)
         end = datetime.fromtimestamp(end_ts, TZ)
     except (ValueError, OverflowError, OSError) as e:
-        print(f"❌ 时间戳无效（应为 Unix 秒，注意不是毫秒）：{e}")
-        return 1
+        return _emit_response(error_response(f"时间戳无效（应为 Unix 秒，注意不是毫秒）：{e}"))
     period_s = start.strftime("%m-%d %H:%M")
     period_e = end.strftime("%m-%d %H:%M")
     my_user_id = config["notify"]["user_id"]
@@ -295,29 +317,27 @@ def cmd_summarize(start_ts: int, end_ts: int, quiet: bool = False) -> int:
     try:
         categorized, fetcher = _fetch_window(config, start, end, set())
         total = sum(len(msgs) for msgs in categorized.values())
-        if total == 0:
-            print(f"📭 {period_s} ~ {period_e} 期间没有新消息")
-            return 0
-        analysis = _analyze_window(config, fetcher, categorized, start, end, my_user_id)
+        analysis = (_analyze_window(config, fetcher, categorized, start, end, my_user_id)
+                    if total else {})
+        # 封套构建也在 try 内：spec 保证 stdout 永远是合法封套（含「汇总异常」），
+        # 任何脏数据（如 chat_id 为 null）都不能以裸 traceback 收场。
+        resp = build_summary_response(categorized, analysis, period_s, period_e, my_user_id)
     except Exception as e:  # noqa: BLE001
-        print(f"❌ 汇总失败：{e}")
-        return 1
+        return _emit_response(error_response(f"汇总失败：{e}"))
 
-    text = build_summary_text(categorized, analysis, period_s, period_e, my_user_id)
-    if not text:
-        print(f"📭 {period_s} ~ {period_e} 期间没有可汇总的内容")
-        return 0
-    print(text)
+    code = _emit_response(resp)
 
     if not quiet:
+        # 是否值得推送由 notify 统一裁决（空封套 → 卡片为 None → 不发），
+        # 不在这里重复判空；传入已构建的封套避免重建、保证 stdout 与推送同源。
         try:
             Notifier(
                 user_id=my_user_id,
                 bot_chat_id=config["notify"]["bot_chat_id"],
-            ).notify(categorized, analysis, period_s, period_e, my_user_id=my_user_id)
+            ).notify(categorized, analysis, period_s, period_e, my_user_id=my_user_id, resp=resp)
         except Exception as e:  # noqa: BLE001
-            print(f"（飞书推送失败，已忽略：{e}）")
-    return 0
+            print(f"（飞书推送失败，已忽略：{e}）", file=sys.stderr)
+    return code
 
 
 def _handle_message(content: str, sender_id: str, config_path: str, state_path: str,
@@ -431,6 +451,21 @@ def _dispatch_trigger(item: tuple[str, str, str], config_path: str, state_path: 
         _reply_bot(my_user_id, "⚠️ 处理请求时出错，请查看日志：\ntail -f ~/.lark_listener/logs/stderr.log")
 
 
+def _poll_wait_timeout(interval: int) -> int:
+    """Queue wait timeout. With auto-poll disabled (interval<=0) we still wake
+    every IDLE_RELOAD_SECONDS to reload config — file edits from another process
+    (lark-listener config set) can't wake the queue, and re-enabling polling
+    must take effect without a restart. The wake is reload-only: poll_once
+    still doesn't run while interval<=0."""
+    return interval if interval > 0 else IDLE_RELOAD_SECONDS
+
+
+def _startup_message(interval: int) -> str:
+    if interval > 0:
+        return f"✅ LarkListener 已启动（轮询间隔 {interval} 秒）。发「帮助」可查看或修改配置。"
+    return "✅ LarkListener 已启动（自动轮询已关闭，仅按需汇总）。发「帮助」可查看或修改配置。"
+
+
 def run():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -451,7 +486,7 @@ def run():
     interval = config.get("poll_interval", 300)
 
     # Notify startup
-    _reply_bot(my_user_id, f"✅ LarkListener 已启动（轮询间隔 {interval} 秒）。发「帮助」可查看或修改配置。")
+    _reply_bot(my_user_id, _startup_message(interval))
 
     # Start bot listener in background thread
     listener_thread = threading.Thread(target=_bot_listener, daemon=True)
@@ -464,15 +499,20 @@ def run():
             config = load_config(config_path)
             interval = config.get("poll_interval", 300)
             my_user_id = config["notify"]["user_id"]
-            poll_once(config_path, state_path)
-            error_count = 0  # Reset on success
+            # interval<=0 关闭自动轮询：只保留 bot 监听/按需汇总/改配置，不再定时拉取。
+            if interval > 0:
+                poll_once(config_path, state_path)
+            # 任何健康迭代都重置（不只 interval>0）：否则汇总-only 模式下相隔数周
+            # 的孤立瞬时错误会累计成虚假的「连续出错」告警。
+            error_count = 0
         except Exception:
             logger.exception("Error during poll cycle")
             error_count = _note_poll_error(error_count, my_user_id)
 
-        # Wait for interval or trigger
+        # Wait for the next interval; with auto-poll off, wake periodically
+        # (IDLE_RELOAD_SECONDS) just to reload config, or earlier on a bot trigger.
         try:
-            item = _trigger_queue.get(timeout=interval)
+            item = _trigger_queue.get(timeout=_poll_wait_timeout(interval))
         except queue.Empty:
             continue
         if item is None:

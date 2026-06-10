@@ -69,10 +69,18 @@ def test_scalar_set_coerces_string_to_int():
     assert "300" in diff and "600" in diff
 
 
-def test_poll_interval_rejects_non_positive():
-    _, err = config_editor.compute_diff(
+def test_poll_interval_accepts_zero():
+    # 0 = 关闭自动轮询，应被接受
+    diff, err = config_editor.compute_diff(
         [{"field": "poll_interval", "op": "set", "value": 0}], EFFECTIVE)
-    assert "正整数" in err
+    assert err is None
+
+
+def test_poll_interval_rejects_negative():
+    _, err = config_editor.compute_diff(
+        [{"field": "poll_interval", "op": "set", "value": -1}], EFFECTIVE)
+    assert err is not None
+    assert "非负" in err
 
 
 def test_poll_interval_rejects_non_number():

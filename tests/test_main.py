@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import pytest
@@ -574,25 +575,34 @@ def test_analyze_window_returns_analysis(MockAnalyzer):
     fetcher.fetch_context.assert_not_called()
 
 
-def test_cmd_summarize_start_after_end_errors():
+def test_cmd_summarize_start_after_end_errors(capsys):
     assert main_mod.cmd_summarize(2000, 1000) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == 1
+    assert "必须早于" in out["errorMsg"]
     assert main_mod.cmd_summarize(1000, 1000) == 1
 
 
 @patch("lark_listener.main.Notifier")
-@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main.build_summary_response")
 @patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
 @patch("lark_listener.main._fetch_window")
 @patch("lark_listener.main.set_lark_profile")
 @patch("lark_listener.main.load_config")
-def test_cmd_summarize_default_pushes_feishu_and_stdout(
-        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+def test_cmd_summarize_default_pushes_feishu_and_json_stdout(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, MockNotifier, capsys):
     mock_cfg.return_value = {"lark_cli_appid": "cli",
                              "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    mock_resp.return_value = {
+        "code": 0, "errorMsg": "",
+        "data": {"period": {"start": "06-09 10:00", "end": "06-09 11:00"},
+                 "conversations": [{"category": "p2p", "title": "张三"}]},
+    }
     code = main_mod.cmd_summarize(1000, 2000, quiet=False)
-    out = capsys.readouterr().out
-    assert "汇总ABC" in out
+    out = json.loads(capsys.readouterr().out)  # stdout must be valid JSON envelope
+    assert out["code"] == 0
+    assert out["data"]["conversations"][0]["title"] == "张三"
     MockNotifier.return_value.notify.assert_called_once()
     args = mock_fw.call_args.args
     assert args[1] == datetime.fromtimestamp(1000, main_mod.TZ)
@@ -601,49 +611,66 @@ def test_cmd_summarize_default_pushes_feishu_and_stdout(
 
 
 @patch("lark_listener.main.Notifier")
-@patch("lark_listener.main.build_summary_text", return_value="汇总ABC")
+@patch("lark_listener.main.build_summary_response")
 @patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
 @patch("lark_listener.main._fetch_window")
 @patch("lark_listener.main.set_lark_profile")
 @patch("lark_listener.main.load_config")
 def test_cmd_summarize_quiet_skips_feishu(
-        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, MockNotifier, capsys):
     mock_cfg.return_value = {"lark_cli_appid": "cli",
                              "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
+    mock_resp.return_value = {
+        "code": 0, "errorMsg": "",
+        "data": {"period": {"start": "s", "end": "e"},
+                 "conversations": [{"category": "p2p", "title": "张三"}]},
+    }
     code = main_mod.cmd_summarize(1000, 2000, quiet=True)
-    assert "汇总ABC" in capsys.readouterr().out
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == 0
     MockNotifier.return_value.notify.assert_not_called()
-    assert code == 0
-
-
-@patch("lark_listener.main._fetch_window")
-@patch("lark_listener.main.set_lark_profile")
-@patch("lark_listener.main.load_config")
-def test_cmd_summarize_no_messages(mock_cfg, mock_prof, mock_fw, capsys):
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
-    mock_fw.return_value = ({}, MagicMock())
-    code = main_mod.cmd_summarize(1000, 2000)
-    assert "没有新消息" in capsys.readouterr().out
     assert code == 0
 
 
 @patch("lark_listener.main.Notifier")
-@patch("lark_listener.main.build_summary_text", return_value="")
-@patch("lark_listener.main._analyze_window", return_value={"oc": "a"})
 @patch("lark_listener.main._fetch_window")
 @patch("lark_listener.main.set_lark_profile")
 @patch("lark_listener.main.load_config")
-def test_cmd_summarize_empty_text_no_push(
-        mock_cfg, mock_prof, mock_fw, mock_aw, mock_text, MockNotifier, capsys):
+def test_cmd_summarize_empty_outputs_json_and_delegates_push(
+        mock_cfg, mock_prof, mock_fw, MockNotifier, capsys):
+    """No messages → still a valid empty envelope on stdout. 是否推送由 notify
+    统一裁决（空封套 → 卡片 None → 不发），cmd_summarize 不重复判空；
+    传入的 resp 必须就是 stdout 那份封套（同源）。"""
+    mock_cfg.return_value = {"lark_cli_appid": "cli",
+                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_fw.return_value = ({}, MagicMock())
+    code = main_mod.cmd_summarize(1000, 2000)
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == 0
+    assert out["data"]["conversations"] == []
+    passed_resp = MockNotifier.return_value.notify.call_args.kwargs["resp"]
+    assert passed_resp["data"]["conversations"] == []
+    assert code == 0
+
+
+@patch("lark_listener.main.build_summary_response", side_effect=RuntimeError("脏数据"))
+@patch("lark_listener.main._analyze_window", return_value={})
+@patch("lark_listener.main._fetch_window")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_cmd_summarize_envelope_build_error_still_json(
+        mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, capsys):
+    """封套构建本身抛异常（如 chat_id 为 null 的脏消息）也必须产出错误封套，
+    stdout 永远是合法 JSON，不能裸 traceback。"""
     mock_cfg.return_value = {"lark_cli_appid": "cli",
                              "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
-    code = main_mod.cmd_summarize(1000, 2000, quiet=False)
-    assert "没有可汇总的内容" in capsys.readouterr().out
-    MockNotifier.return_value.notify.assert_not_called()
-    assert code == 0
+    code = main_mod.cmd_summarize(1000, 2000, quiet=True)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert out["code"] == 1
+    assert "汇总失败" in out["errorMsg"]
 
 
 def test_main_summarize_dispatch(monkeypatch):
@@ -674,4 +701,123 @@ def test_cmd_summarize_out_of_range_timestamp(mock_cfg, mock_prof, capsys):
                              "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
     code = main_mod.cmd_summarize(1_000_000, 1_717_900_000_000)
     assert code == 1
-    assert "时间戳无效" in capsys.readouterr().out
+    out = json.loads(capsys.readouterr().out)
+    assert "时间戳无效" in out["errorMsg"]
+
+
+# --- poll_interval=0 关闭自动轮询 ---
+
+
+def test_poll_wait_timeout_bounded_when_zero():
+    # 0/负数 = 关自动轮询 → 有界等待（定期醒来 reload 配置，否则 config_cli
+    # 从另一进程改写 config.yaml 永远无法被感知）；正数 = 轮询间隔
+    assert main_mod._poll_wait_timeout(0) == main_mod.IDLE_RELOAD_SECONDS
+    assert main_mod._poll_wait_timeout(-5) == main_mod.IDLE_RELOAD_SECONDS
+    assert main_mod._poll_wait_timeout(300) == 300
+
+
+def test_startup_message_reflects_mode():
+    assert "轮询间隔 300 秒" in main_mod._startup_message(300)
+    assert "自动轮询已关闭" in main_mod._startup_message(0)
+
+
+@patch("lark_listener.main._dispatch_trigger")
+@patch("lark_listener.main.poll_once")
+@patch("lark_listener.main.threading.Thread")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_run_skips_poll_when_interval_zero(mock_cfg, mock_prof, mock_reply,
+                                           mock_thread, mock_poll, mock_disp):
+    mock_cfg.return_value = {"lark_cli_appid": "cli", "poll_interval": 0,
+                             "notify": {"user_id": "ou"}}
+    main_mod._running = True
+    try:
+        with patch.object(main_mod._trigger_queue, "get", return_value=None):
+            main_mod.run()
+    finally:
+        main_mod._running = True
+    mock_poll.assert_not_called()
+
+
+@patch("lark_listener.main._dispatch_trigger")
+@patch("lark_listener.main.poll_once")
+@patch("lark_listener.main.threading.Thread")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_run_polls_when_interval_positive(mock_cfg, mock_prof, mock_reply,
+                                          mock_thread, mock_poll, mock_disp):
+    mock_cfg.return_value = {"lark_cli_appid": "cli", "poll_interval": 300,
+                             "notify": {"user_id": "ou"}}
+    main_mod._running = True
+    try:
+        with patch.object(main_mod._trigger_queue, "get", return_value=None):
+            main_mod.run()
+    finally:
+        main_mod._running = True
+    mock_poll.assert_called_once()
+
+
+ZERO_POLL_CONFIG = SAMPLE_CONFIG.replace("poll_interval: 60", "poll_interval: 0")
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_interval_zero_uses_default_lookback(MockFetcher, MockAnalyzer, MockNotifier, tmp_path):
+    """interval=0 + 无 last_poll_time：手动「汇总」回溯 30 分钟，
+    绝不能用 interval 兜底（回溯 0 秒＝零宽窗口必然为空）。"""
+    mock_fetcher = MockFetcher.return_value
+    mock_fetcher.fetch.return_value = {cat: [] for cat in MessageCategory}
+    config_path = str(tmp_path / "config.yaml")
+    state_path = str(tmp_path / "state.json")
+    with open(config_path, "w") as f:
+        f.write(ZERO_POLL_CONFIG)
+
+    poll_once(config_path, state_path)
+
+    start, end = mock_fetcher.fetch.call_args.args[:2]
+    width = (end - start).total_seconds()
+    assert width == pytest.approx(main_mod.MANUAL_LOOKBACK_SECONDS, abs=5)
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_interval_zero_caps_stale_window(MockFetcher, MockAnalyzer, MockNotifier, tmp_path):
+    """interval=0 + 很旧的 last_poll_time（如刚从轮询模式切过来）：
+    窗口封顶 24h，防止一次拉取数周消息爆 AI 成本。"""
+    mock_fetcher = MockFetcher.return_value
+    mock_fetcher.fetch.return_value = {cat: [] for cat in MessageCategory}
+    config_path = str(tmp_path / "config.yaml")
+    state_path = str(tmp_path / "state.json")
+    with open(config_path, "w") as f:
+        f.write(ZERO_POLL_CONFIG)
+    stale = (_dt.now(main_mod.TZ) - _td(days=14)).isoformat()
+    with open(state_path, "w") as f:
+        f.write(json.dumps({"last_poll_time": stale, "processed_message_ids": []}))
+
+    poll_once(config_path, state_path)
+
+    start, end = mock_fetcher.fetch.call_args.args[:2]
+    width = (end - start).total_seconds()
+    assert width == pytest.approx(main_mod.MANUAL_WINDOW_CAP_SECONDS, abs=5)
+
+
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_interval_positive_window_unchanged(MockFetcher, MockAnalyzer, MockNotifier, tmp_path):
+    """interval>0 的常规路径行为不变：无 last_poll_time 回溯 interval 秒。"""
+    mock_fetcher = MockFetcher.return_value
+    mock_fetcher.fetch.return_value = {cat: [] for cat in MessageCategory}
+    config_path = str(tmp_path / "config.yaml")
+    state_path = str(tmp_path / "state.json")
+    with open(config_path, "w") as f:
+        f.write(SAMPLE_CONFIG)  # poll_interval: 60
+
+    poll_once(config_path, state_path)
+
+    start, end = mock_fetcher.fetch.call_args.args[:2]
+    assert (end - start).total_seconds() == pytest.approx(60, abs=5)

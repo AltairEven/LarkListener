@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import yaml
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger("lark_listener")
 
 DEFAULTS = {
     "poll_interval": 300,
@@ -57,6 +60,27 @@ def _validate(config: dict) -> None:
         )
 
 
+def _normalize_poll_interval(value: Any) -> int:
+    """钳制 poll_interval 为非负 int（0=关闭自动轮询）。
+
+    run 循环 / _poll_wait_timeout / _startup_message / doctor / poll_once 窗口
+    计算都直接对它做数值比较——手编 config.yaml 留下 null/字符串/负数时，与其
+    抛 TypeError 把服务打进 launchd KeepAlive 崩溃重启循环，不如在这个所有
+    消费点共同经过的咽喉钳制并告警。"""
+    if isinstance(value, bool):  # bool 是 int 子类，true/false 视为非法
+        logger.warning("poll_interval 配置非法（%r），已回退默认 %s", value, DEFAULTS["poll_interval"])
+        return DEFAULTS["poll_interval"]
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        logger.warning("poll_interval 配置非法（%r），已回退默认 %s", value, DEFAULTS["poll_interval"])
+        return DEFAULTS["poll_interval"]
+    if n < 0:
+        logger.warning("poll_interval 为负（%r），按 0（关闭自动轮询）处理", value)
+        return 0
+    return n
+
+
 def load_config(path: Optional[str] = None) -> dict[str, Any]:
     """Load config from YAML file, applying defaults for missing fields."""
     if path is None:
@@ -72,5 +96,6 @@ def load_config(path: Optional[str] = None) -> dict[str, Any]:
         user_config = yaml.safe_load(f) or {}
 
     config = _deep_merge(DEFAULTS, user_config)
+    config["poll_interval"] = _normalize_poll_interval(config.get("poll_interval"))
     _validate(config)
     return config

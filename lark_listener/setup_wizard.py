@@ -138,7 +138,10 @@ def cmd_setup() -> None:
     cfg_path = service.LISTENER_HOME / "config.yaml"
     if not cfg_path.exists():
         # 2) 配置向导
-        poll = input("轮询间隔（秒，默认 300）: ").strip() or "300"
+        poll = input("轮询间隔（秒，默认 300；填 0 关闭自动轮询、仅按需汇总）: ").strip() or "300"
+        if int(poll) < 0:
+            print("⚠️ 轮询间隔不能为负，已按 0（关闭自动轮询）处理")
+            poll = "0"
         kw_raw = input("关注的关键词（逗号分隔，可空）: ").strip()
         keywords = [k.strip() for k in kw_raw.split(",") if k.strip()] if kw_raw else []
         print("AI 后端：1) openai  2) claude  3) ollama")

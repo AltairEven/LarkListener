@@ -77,8 +77,8 @@ def _coerce_scalar(field, value, current):
             n = int(value)
         except (ValueError, TypeError):
             return None, f"{field} 需要整数"
-        if field == "poll_interval" and n <= 0:
-            return None, "poll_interval 需为正整数"
+        if field == "poll_interval" and n < 0:
+            return None, "poll_interval 需为非负整数（0=关闭自动轮询）"
         if field == "context_messages" and n < 0:
             return None, "context_messages 需为非负整数"
         return n, None

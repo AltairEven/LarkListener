@@ -67,6 +67,9 @@ def check_lark_cli(run=None) -> Check:
 
 def check_last_poll(status: dict, poll_interval: int, now: Optional[datetime] = None) -> Check:
     now = now or datetime.now(TZ)
+    if poll_interval <= 0:
+        # 自动轮询已关闭（仅按需汇总），last_poll 不会推进，时效检查无意义。
+        return Check("last_poll", "ok", "自动轮询已关闭（poll_interval=0），仅按需汇总")
     raw = status.get("last_poll_time")
     if not raw:
         return Check("last_poll", "warn", "从未成功轮询过", fix="lark-listener doctor --deep / 看日志")

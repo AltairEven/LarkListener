@@ -16,10 +16,17 @@ class MessageCategory(Enum):
     AT_ALL = "at_all"
 
 
+# 机器人应用名的模块级成功缓存（app_id → app_name）：应用名基本不变，
+# 守护进程生命周期内每个 app 只查一次。
+_APP_NAME_CACHE: dict[str, str] = {}
+
+
 class Fetcher:
     def __init__(self, keywords: Optional[list[str]] = None, include_at_all: bool = True):
         self.keywords = keywords or []
         self.include_at_all = include_at_all
+        # 实例级失败记录：权限未批（210508）等失败本轮不重试，下轮新实例再试。
+        self._app_name_failed: set[str] = set()
 
     def fetch(
         self,
@@ -68,6 +75,8 @@ class Fetcher:
 
         # Fill in missing chat names for group messages
         self._fill_chat_names(result)
+        # Fill in bot app names for app senders (p2p bot chats have no other name source)
+        self._fill_app_sender_names(result)
 
         return result
 
@@ -124,6 +133,53 @@ class Fetcher:
             for msg in result[cat]:
                 if not msg.get("chat_name") and msg.get("chat_id") in name_map:
                     msg["chat_name"] = name_map[msg["chat_id"]]
+
+    def _fill_app_sender_names(self, result: dict[MessageCategory, list[dict[str, Any]]]):
+        """给机器人（app）发送者补名字：app 发送者的消息天然没有 sender.name，
+        p2p 机器人会话的标题会因此退化。真名只存在于应用信息 API；
+        未授权/失败时静默跳过（notifier 有可读回退），best-effort 不抛。"""
+        for msgs in result.values():
+            for m in msgs:
+                sender = m.get("sender", {})
+                if sender.get("name"):
+                    continue
+                if sender.get("sender_type") != "app" and sender.get("id_type") != "app_id":
+                    continue
+                app_id = sender.get("id", "")
+                if not app_id:
+                    continue
+                name = self._get_app_name(app_id)
+                if name:
+                    sender["name"] = name
+
+    def _get_app_name(self, app_id: str) -> Optional[str]:
+        """查机器人应用名（应用信息 API，bot 身份，需 admin:app.info:readonly）。
+
+        该接口仅收 tenant_access_token（user token 报 99991668）；lang 为必填
+        query 参数，须经 --params 传递（lark-cli ≥1.0.50，直接拼 ?lang= 会被丢弃）。
+        成功进模块级缓存；失败记实例级缓存（本轮不重试），绝不抛。"""
+        if app_id in _APP_NAME_CACHE:
+            return _APP_NAME_CACHE[app_id]
+        if app_id in self._app_name_failed:
+            return None
+        try:
+            proc = subprocess.run(
+                lark_cli("api", "get",
+                         f"/open-apis/application/v6/applications/{app_id}",
+                         "--params", '{"lang":"zh_cn"}',
+                         "--as", "bot",
+                         "--jq", ".data.app.app_name"),
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0:
+                name = proc.stdout.strip().strip('"')
+                if name and name != "null":
+                    _APP_NAME_CACHE[app_id] = name
+                    return name
+        except Exception:
+            pass
+        self._app_name_failed.add(app_id)
+        return None
 
     def _get_chat_name(self, chat_id: str) -> Optional[str]:
         """Get chat name via lark-cli, trying user then bot identity."""
