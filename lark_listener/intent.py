@@ -30,6 +30,9 @@ type 取值：
   {{"field": 字段名, "op": "set"|"add"|"remove", "value": 值}}。
   列表字段（如 keywords）用 add/remove/set；标量字段（如 poll_interval）用 set。
   注意：ai 和 notify 不可修改，若用户想改这两个，仍按 config_modify 输出，由后续逻辑拒绝。
+  exclude_chats 的 add/remove 值为会话 chat_id（如 "oc_xxx"）；
+  special_focus.enabled / special_focus.max_messages 是嵌套标量，field 写点号路径；
+  special_focus.chats 不可经 bot 修改（请直接编辑配置文件）。
 - "config_help"：用户想了解能改什么、怎么用。
 - "confirm"：用户确认（如"确认""是""好的"）。
 - "cancel"：用户取消（如"取消""不要了"）。
@@ -59,7 +62,7 @@ def _editable_config(config: dict) -> dict:
 
     ai / notify must be configured manually — they are never parsed or set via
     the bot, so their secrets (api_key, user_id) never leave for the AI
-    provider. Note: exclude_chat_ids IS editable and may contain the bot chat's
+    provider. Note: exclude_chats IS editable and may contain the bot chat's
     oc_xxx (setup puts it there) — a chat id alone is low-sensitivity and this
     is accepted.
     """
