@@ -67,7 +67,9 @@ def test_build_config_dict_shape():
     assert cfg["ai"] == {"provider": "openai", "model": "gpt-4o", "api_key": "sk-1", "base_url": ""}
     assert cfg["notify"] == {"user_id": "ou_me", "bot_chat_id": "oc_bot"}
     # bot 自身会话默认排除，避免汇总自己的推送
-    assert cfg["exclude_chat_ids"] == ["oc_bot"]
+    assert cfg["exclude_chats"] == [{"chat_id": "oc_bot", "name": "LarkListener Bot"}]
+    assert "include_at_all" not in cfg
+    assert "exclude_chat_ids" not in cfg
 
 
 def test_write_config_file_roundtrips(tmp_path):
@@ -119,3 +121,14 @@ def test_cmd_setup_eof_cancels(monkeypatch, tmp_path):
         raise EOFError
     monkeypatch.setattr("builtins.input", _eof)
     assert setup_wizard.cmd_setup() == 1
+
+
+def test_build_config_dict_new_format():
+    cfg = setup_wizard.build_config_dict(
+        poll_interval=300, appid="cli_x", keywords=["SDK"],
+        ai_provider="claude", ai_model="m", ai_key="k", ai_base_url="",
+        user_id="ou_me", bot_chat_id="oc_bot")
+    assert "include_at_all" not in cfg
+    assert "exclude_chat_ids" not in cfg
+    assert cfg["exclude_chats"] == [{"chat_id": "oc_bot", "name": "LarkListener Bot"}]
+    assert cfg["special_focus"] == {"enabled": False, "max_messages": 20, "chats": []}
