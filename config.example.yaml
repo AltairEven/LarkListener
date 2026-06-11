@@ -11,9 +11,6 @@ lark_cli_appid:
 # 汇总/改配置）；负数按 0 处理，非法值（字符串等）回退 300。
 poll_interval: 300
 
-# 是否汇总 @所有人 的消息（命中关键词的仍会汇总）。默认 true。
-include_at_all: true
-
 # AI 分析时为每个会话额外拉取的上下文消息数（0 表示不拉取）。默认 20。
 # 负数按 0 处理，非法值（字符串等）回退 20。
 context_messages: 20
@@ -24,12 +21,26 @@ context_messages: 20
 #     - 故障
 keywords: []
 
-# 屏蔽的聊天 chat_id（这些聊天的消息不会被汇总）。默认空列表。
+# 排除的会话（不参与任何汇总）。name 留空会在轮询时自动补全。
 # Bot 自身会话由 setup 自动加入；不可经 Bot 指令移除，`config set --remove`
-# 需加 --force（防止汇总消息被自身轮询命中形成自反馈）。示例：
-#   exclude_chat_ids:
-#     - oc_xxxxxxxxxxxx    # LarkListener Bot
-exclude_chat_ids: []
+# 需加 --force（防止汇总消息被自身轮询命中形成自反馈）。
+exclude_chats: []
+# 例：
+#   exclude_chats:
+#     - chat_id: oc_xxxxxxxx
+#       name: 某某群
+
+# 特别关注：未免打扰的群在开启后全量汇总（含未 @你、未命中关键词的消息）。
+# 顶层 keywords 即全局关注词；chats 可按群叠加专属关注词（仅 AI 分析用）。
+special_focus:
+  enabled: false
+  max_messages: 20        # 每个特别关注群单轮汇总的消息条数上限
+  chats: []
+  # 例：
+  #   chats:
+  #     - chat_id: oc_xxxxxxxx
+  #       name: 某某群        # 留空自动补全
+  #       keywords: [扩容]
 
 # AI 模型配置
 ai:
