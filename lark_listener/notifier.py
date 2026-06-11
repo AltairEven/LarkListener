@@ -28,37 +28,44 @@ def _chat_link(chat_id: str) -> str:
 
 def _group_by_chat(
     categorized: dict[MessageCategory, list[dict[str, Any]]],
-) -> dict[str, dict]:
-    """Group messages by chat_id, preserving category info."""
-    groups: dict[str, dict] = {}
+) -> dict[tuple[str, str], dict]:
+    """Group messages by (category, chat_id).
+
+    键含 category：同一个群可同时出现在 @我 行与特别关注行（spec §1，
+    用户确认的「两行」语义）。同群多行共享同一段 AI 摘要（analysis 按
+    chat_id 一份）——这是按类别拆行的自然代价。"""
+    groups: dict[tuple, dict] = {}
     for cat, msgs in categorized.items():
         for msg in msgs:
             # `or` 而非 .get 默认值：真实数据见过 chat_id 显式为 null，
             # None 流进 _conversation_row 的 chat_id[-8:] 会 TypeError。
             chat_id = msg.get("chat_id") or "unknown"
-            if chat_id not in groups:
-                groups[chat_id] = {
+            key = (cat.value, chat_id)
+            if key not in groups:
+                groups[key] = {
                     "chat_id": chat_id,
                     "category": cat,
                     "messages": [],
                     "chat_name": "",
                     "matched_keyword": msg.get("matched_keyword", ""),
                 }
-            groups[chat_id]["messages"].append(msg)
+            groups[key]["messages"].append(msg)
             # Capture the group name (p2p partner name is resolved later in
             # _conversation_row directly from the messages).
             if cat != MessageCategory.P2P and msg.get("chat_name"):
-                groups[chat_id]["chat_name"] = msg["chat_name"]
+                groups[key]["chat_name"] = msg["chat_name"]
     return groups
 
 
 # Category render order, shared by the unified response, the card, and the
 # Markdown fallback so every consumer sees the same sectioning.
+# 顺序与归类优先级一致：私聊 > @我 > @所有人 > 特别关注 > 关键词
 _CATEGORY_ORDER = [
     (MessageCategory.P2P, "私聊消息"),
     (MessageCategory.AT_ME, "@我"),
-    (MessageCategory.KEYWORD, "关键词命中"),
     (MessageCategory.AT_ALL, "@所有人"),
+    (MessageCategory.SPECIAL, "特别关注"),
+    (MessageCategory.KEYWORD, "关键词命中"),
 ]
 
 # macOS 通知摘要的短名（顺序同 _CATEGORY_ORDER；通知空间有限，
@@ -66,8 +73,9 @@ _CATEGORY_ORDER = [
 _CATEGORY_SHORT = [
     (MessageCategory.P2P, "私聊"),
     (MessageCategory.AT_ME, "@我"),
-    (MessageCategory.KEYWORD, "关键词命中"),
     (MessageCategory.AT_ALL, "@所有人"),
+    (MessageCategory.SPECIAL, "特别关注"),
+    (MessageCategory.KEYWORD, "关键词命中"),
 ]
 
 # 卡片表头用彩色方块区分分类（飞书 table 表头背景实测只支持 none/grey，
@@ -75,8 +83,9 @@ _CATEGORY_SHORT = [
 _CATEGORY_EMOJI = {
     "p2p": "🟦",
     "at_me": "🟩",
-    "keyword": "🟧",
     "at_all": "🟥",
+    "special": "🟪",
+    "keyword": "🟧",
 }
 
 

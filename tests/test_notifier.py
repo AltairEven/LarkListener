@@ -282,7 +282,7 @@ def test_build_summary_at_all_section():
 
 
 def test_build_summary_section_order():
-    """Sections should appear in order: 私聊 → @我 → 关键词 → @所有人."""
+    """Sections should appear in order: 私聊 → @我 → @所有人 → 关键词命中."""
     messages = {
         MessageCategory.P2P: [
             _make_msg("msg_p", "oc_p", "ou_a", "A", "私聊"),
@@ -299,7 +299,7 @@ def test_build_summary_section_order():
         ],
     }
     text = build_summary_text_legacy(messages, {}, "15:00", "15:30", MY_USER_ID)
-    assert text.index("私聊消息") < text.index("@我") < text.index("关键词命中") < text.index("@所有人")
+    assert text.index("私聊消息") < text.index("@我") < text.index("@所有人") < text.index("关键词命中")
 
 
 # --- build_summary_response (统一封套) tests ---
@@ -354,7 +354,7 @@ def test_response_category_order():
     }
     convs = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)["data"]["conversations"]
     cats = [c["category"] for c in convs]
-    assert cats == ["p2p", "at_me", "keyword", "at_all"]
+    assert cats == ["p2p", "at_me", "at_all", "keyword"]
 
 
 def test_response_urgent_first_within_category():
@@ -842,3 +842,46 @@ def test_short_snippet_strips_envelope_ellipsis():
     assert "部署" in out
     assert "...." not in out                      # 无省略号残渣
     assert out.endswith("...")                    # 截断信息仍由本函数表达
+
+
+# --- SPECIAL 类别测试 ---
+
+
+def test_category_order_matches_priority():
+    """卡片/封套顺序与归类优先级一致：私聊 > @我 > @所有人 > 特别关注 > 关键词。"""
+    messages = {
+        MessageCategory.P2P: [_make_msg("m1", "oc_p", "ou_a", "甲", "hi")],
+        MessageCategory.AT_ME: [_make_msg("m2", "oc_g1", "ou_b", "乙", "@你", chat_name="G1")],
+        MessageCategory.AT_ALL: [_make_msg("m3", "oc_g2", "ou_c", "丙", "@_all", chat_name="G2")],
+        MessageCategory.SPECIAL: [_make_msg("m4", "oc_vip", "ou_d", "丁", "聊", chat_name="VIP")],
+        MessageCategory.KEYWORD: [_make_msg("m5", "oc_g3", "ou_e", "戊", "部署",
+                                            chat_name="G3", matched_keyword="部署")],
+    }
+    convs = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)["data"]["conversations"]
+    assert [c["category"] for c in convs] == ["p2p", "at_me", "at_all", "special", "keyword"]
+
+
+def test_card_renders_special_section():
+    messages = {cat: [] for cat in MessageCategory}
+    messages[MessageCategory.SPECIAL] = [
+        _make_msg("m1", "oc_vip", "ou_a", "甲", "聊天内容", chat_name="VIP群")]
+    card = build_summary_card(build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID))
+    headers = [col["display_name"] for el in card["body"]["elements"]
+               for col in el["columns"]]
+    assert any("特别关注" in h for h in headers)
+    assert any("🟪" in h for h in headers)
+
+
+def test_same_chat_splits_into_at_me_and_special_rows():
+    """spec §1：特别关注群里 @我 的消息单独成行，剩余消息进特别关注行——
+    同一个群两行（分组键必须含 category，否则 SPECIAL 余量会并进 @我 行）。"""
+    messages = {cat: [] for cat in MessageCategory}
+    messages[MessageCategory.AT_ME] = [
+        _make_msg("m1", "oc_vip", "ou_a", "甲", "@你 看一下", chat_name="VIP群")]
+    messages[MessageCategory.SPECIAL] = [
+        _make_msg("m2", "oc_vip", "ou_b", "乙", "其余闲聊", chat_name="VIP群")]
+    convs = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)["data"]["conversations"]
+    assert [(c["category"], c["chat_id"]) for c in convs] == [
+        ("at_me", "oc_vip"), ("special", "oc_vip")]
+    # 两行各自只含本类别消息
+    assert [c["count"] for c in convs] == [1, 1]
