@@ -10,18 +10,20 @@
 
 | 模块 | 职责 |
 |---|---|
-| `main.py` | `main()` argparse 分发器（子命令均返回退出码经 `sys.exit`：status/doctor/config get-set/summarize/agent-skills/start/stop/restart/…）；`run()` 守护循环（`poll_interval=0`=关自动轮询：跳过 poll_once、等待用有界超时 `IDLE_RELOAD_SECONDS` 定期 reload 配置）；`poll_once`/`_handle_message`/`_bot_listener` 守护逻辑（interval<=0 时手动汇总窗口回溯 30min/封顶 24h）；`_fetch_window`/`_analyze_window`（poll_once 与 summarize 共用的「产出」核心）；`cmd_summarize`（按需汇总→stdout 输出统一封套 `{code,errorMsg,data}` JSON，退出码=code，默认也推飞书卡片） |
-| `service.py` | launchd 管理：`shim_path`/`node_bin_dir`/`build_plist`/`stop_service`/`ensure_shim_link`；`collect_status`（机读状态 dict）+ `cmd_start/stop/restart/status/config/uninstall`（均返回退出码；`cmd_uninstall` 兼清理 agent skill，dev 隔离态跳过） |
-| `setup_wizard.py` | 交互安装向导 `cmd_setup`；纯函数 `build_config_dict`/`write_config_file`/`ai_packages_for`/`_pip_install_ai` |
-| `analyzer.py` / `intent.py` | 调 AI（**延迟 import** anthropic/openai；ollama 走标准库 urllib） |
+| `main.py` | `main()` argparse 分发器（子命令均返回退出码经 `sys.exit`，仅 `run` 除外：status/doctor/config get-set/summarize/agent-skills/setup/start/stop/restart/…）；`run()` 守护循环（monotonic 节拍 `next_cycle_due`：**trigger 不重置节拍、config reload 仅到期发生**——大 interval 下 `config set` 最长等一个旧 interval；`poll_interval=0`=关自动轮询：跳过 poll_once、节拍上限 `IDLE_RELOAD_SECONDS`；启动期 load_config 失败分片慢退 60s 防 KeepAlive 风暴）；`poll_once`/`_handle_message`/`_bot_listener` 守护逻辑（interval<=0 时手动汇总窗口回溯 30min/封顶 24h）；`_fetch_window`/`_analyze_window`（poll_once 与 summarize 共用的「产出」核心）；poll_once 的 notify 失败兜底（log+告警 owner 后仍推进 state，防毒消息冻结窗口）；`cmd_summarize`（按需汇总→stdout 输出统一封套 `{code,errorMsg,data}` JSON，退出码=code，默认也推飞书卡片） |
+| `service.py` | launchd 管理：`shim_path`/`node_bin_dir`/`build_plist`/`stop_service`/`ensure_shim_link`；`collect_status`（机读状态 dict）+ `cmd_start/stop/restart/status/config/uninstall`（均返回退出码；`cmd_uninstall` 兼清理 agent skill、EOF/Ctrl-C 取消返回 1，dev 隔离态跳过；`stop_service` 的 event 子进程清理按配置 appid 隔离） |
+| `setup_wizard.py` | 交互安装向导 `cmd_setup`（返回退出码 0/1，EOF/Ctrl-C 干净取消）；纯函数 `build_config_dict`/`write_config_file`（经 dump_roundtrip 原子写+0600）/`_parse_poll`/`ai_packages_for`（委托 providers）/`_pip_install_ai` |
+| `providers.py` | **AI provider 注册表（唯一事实源）**：每后端一个对象（`complete`/`deep_probe`/`sdk_import`/`pip_packages`）+ `extract_json`；SDK 在方法体内**延迟 import**；新增 AI 后端主要改这个文件（analyzer._call_ai 分发、doctor provider 白名单、setup 菜单仍需各加一行） |
+| `analyzer.py` / `intent.py` | 调 AI：prompt 构造与结果归一在本层，三后端调用委托 `providers.complete`（`_call_claude/_call_openai/_call_ollama` 与 `_call_ai` 保留原名原签名供单测直测） |
+| `common.py` | 跨模块常量/路径唯一事实源：`TZ`（+08:00）、`listener_home()`（惰性读 `LARK_LISTENER_HOME`；service 例外地 import 时冻结一次） |
 | `fetcher.py` | 调 `lark-cli` 搜消息、取上下文 |
-| `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`（被 main/fetcher/notifier/setup 依赖） |
-| `notifier.py` | 统一封套唯一事实源 `build_summary_response`/`error_response`；卡片 `build_summary_card`（飞书 table 卡片，2026-06-10 真发逐版定稿：分类 emoji+数量入表头、会话列纯名称无🔴、摘要列仅 AI 摘要、原文列=带链接消息片段、row_height auto；表头背景实测仅支持 none/grey）→ 失败回退 `build_summary_text`（Markdown，保留🔴 既有样式）；`Notifier.notify(…, resp=None)` 可直接消费调用方已建封套；macOS 通知（osascript 默认，terminal-notifier 可选） |
-| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify` 受保护不可经 bot 改）；`load_config` 钳制 `poll_interval` 为非负 int（null/字符串/负数等坏值绝不让消费点 TypeError 崩进 KeepAlive 重启循环） |
-| `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend`（浅检零副作用；`--deep` 真打最小请求）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
+| `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`/`event_subscriber_pkill_pattern`（event 订阅 pkill 模式唯一事实源，按 profile 隔离防误杀 dev/prod 对方与其它 agent 的订阅进程；被 main/service/fetcher/notifier/setup 依赖） |
+| `notifier.py` | 统一封套唯一事实源 `build_summary_response`/`error_response`；卡片 `build_summary_card`（飞书 table 卡片，2026-06-10 真发逐版定稿：仅两列——会话列 38% 宽、纯名称无🔴、冒号后直接接带链接原文片段（`_short_snippet` 缩到 20 字内，命中关键词时以关键词为中心截取）+ 摘要列仅 AI 摘要；分类 emoji+数量入表头、row_height auto；表头背景实测仅支持 none/grey）→ 失败回退 `build_summary_text`（Markdown，保留🔴 既有样式）；`Notifier.notify(…, resp=None)` 可直接消费调用方已建封套；macOS 通知（osascript 默认，terminal-notifier 可选） |
+| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify`/`lark_cli_appid` 受保护不可经 bot 改）；`load_config` 钳制：`poll_interval`/`context_messages` 非负 int（负→0/非法→默认）、`keywords`/`exclude_chat_ids` 强制 list[str]（坏值绝不让消费点 TypeError 崩进 KeepAlive 重启循环）；`dump_roundtrip` 0600 原子写（保持原 mode）；`removes_bot_chat` 防自反馈守卫（bot 与 CLI 路径共用） |
+| `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend`（浅检零副作用、兼校验 appid 在 profile 列表但**不验授权时效**；`--deep` 经 `probe_messages_search`（与 setup 共用）真探 search:message + AI 真连；`SEARCH_SCOPE` 唯一事实源；日志只读尾部 64KB）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
 | `config_cli.py` | `config get/set` 非交互：点号路径、列表增/减/整体替换、`--force` 放行受保护键、写后 `_validate` 失败回滚、api_key 脱敏；只复用 `config_editor` 底层（不复用其 bot 调度） |
 | `agent_adapters.py` | 可插拔 adapter 注册表 + `ClaudeCodeAdapter`（装/卸 `~/.claude/skills/lark-listener` 操作 skill，包内资源经 importlib.resources 读）；`install/uninstall_agent_skills`（best-effort） |
-| `state.py` | 去重与上次轮询时间 |
+| `state.py` | 去重与上次轮询时间（坏文件任意形状不崩、原子写；默认路径经 `listener_home()` 尊重 `LARK_LISTENER_HOME`） |
 
 ## 测试规范（核心）
 
@@ -85,7 +87,7 @@ python3 -m pytest -q       # 全绿才算改完
 
 ## 运行情况 & 文件布局（排查/清理用）
 
-`lark-listener doctor` 是主动自检入口（config/lark-cli 授权/轮询时效/日志/AI 后端，每项带 `fix`，`--deep` 验后端真连）；`lark-listener status` 输出服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。二者均支持 `--json` 供 AI agent 机读；退出码：status 0 运行/3 停/4 未装，doctor 0 全过/1 有 fail。
+`lark-listener doctor` 是主动自检入口（config/lark-cli 授权/轮询时效/日志/AI 后端，每项带 `fix`，`--deep` 真探 lark-cli search:message 授权 + AI 后端真连）；`lark-listener status` 输出服务三态 + 主进程/监听子进程 PID + 全部文件位置（带 ✓/—）。二者均支持 `--json` 供 AI agent 机读；退出码：status 0 运行/3 停/4 未装，doctor 0 全过/1 有 fail。
 
 - 进程构成：1 个主进程 `… lark-listener run`（launchd KeepAlive 守护）+ `lark-cli event +subscribe … --as bot` 监听子进程（node 壳 + Go 二进制，由监听线程拉起，断开会按间隔重连）。
 - 文件布局：
@@ -96,7 +98,9 @@ python3 -m pytest -q       # 全绿才算改完
 **手动清理**（`uninstall` 命令失效，或旧版无 `shim_link` 记录导致软链残留时）：
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.larklistener.plist 2>/dev/null
-pkill -f "/.lark_listener/venv/bin/lark-listener run"; pkill -f "lark-cli event.*--as bot"
+pkill -f "/.lark_listener/venv/bin/lark-listener run"
+# 注意：下面这条会波及本机所有 lark-cli bot 订阅进程（含其它 agent 的），仅彻底清理时用
+pkill -f "lark-cli event.*subscribe.*--as bot"
 rm -f ~/Library/LaunchAgents/com.larklistener.plist
 rm -f ~/.local/bin/lark-listener /opt/homebrew/bin/lark-listener /usr/local/bin/lark-listener
 rm -rf ~/.lark_listener

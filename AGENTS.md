@@ -45,39 +45,61 @@ silently assume the currently-active `lark-cli` profile is the right one; ask.
 
 ## 🚫 Do NOT run these unattended
 
-`setup`, `uninstall`, `config` block on stdin or open a GUI — running them through
-your Bash tool will hang or hit EOF and leave a half-configured install.
+`setup`, `uninstall`, `config` block on stdin or open a GUI. EOF/Ctrl-C now cancels
+cleanly (exit 1, nothing half-written; `setup` exits 0 on success / 1 on cancel or
+missing prereqs) — but still hand them to the user; running them through your Bash
+tool just wastes a cancelled run.
 
 - **`lark-listener setup`** — interactive wizard. **Hand it to the user**: tell them
   to run `! lark-listener setup` so it runs in their own session. Before they do,
   make sure they have ready: **the bot appId (`cli_xxx`, see above — emphasise this)**,
   their AI backend + model + API key. Prompts, in order:
   1. **bot appId (`cli_xxx`)** ← the critical one
-  2. poll interval (sec, default 300)
+  2. poll interval (sec, default 300; **0 = disable auto-polling**, on-demand summaries only)
   3. keywords (comma-separated, optional)
   4. AI backend: `1) openai  2) claude  3) ollama`
   5. model name
   6. API key (blank for ollama)
   7. API base URL (blank = default)
-  8. user_id / bot_chat_id — auto-derived via `lark-cli` (no need to ask the user)
+  8. user_id / bot_chat_id — auto-derived via `lark-cli`; if auto-derivation fails the
+     wizard falls back to asking for them manually (`ou_xxx` / `oc_xxx`), so warn the
+     user they might have to paste those
   9. authorise `search:message` — opens a browser
+
+  **Re-running setup with an existing `~/.lark_listener/config.yaml` skips prompts
+  2-7 entirely** — it only re-syncs the appId and derived IDs. To change other
+  settings on an installed instance, use `config set` (below) or edit the file;
+  don't send the user back through setup for that.
 - **`lark-listener uninstall`** — prompts `确认卸载？(y/N)`.
 - **`lark-listener config`** — opens a GUI editor; edit `~/.lark_listener/config.yaml` directly instead.
 
 ## ✅ Safe for you to run
 
 - `lark-listener doctor [--json] [--deep]` — active self-check (config / service /
-  lark-cli auth / poll freshness / logs / AI backend), each finding carries a `fix`.
+  lark-cli / poll freshness / logs / AI backend), each finding carries a `fix`.
   **Start here when something is wrong.** Exit 0 = all pass, 1 = has a fail.
+  The shallow check cannot see token expiry — when summaries stop arriving, run
+  `doctor --deep` (really probes `search:message` auth + the AI backend).
 - `lark-listener status [--json]` — service state + main/listener PIDs + file
   locations + last poll. Exit 0 running / 3 stopped / 4 not installed.
 - `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — on-demand
-  summary of a time window to stdout (Unix-second timestamps; default also pushes
-  the Feishu DM, `--quiet` returns stdout only). Read-only; safe alongside the daemon.
+  summary of a time window (Unix-second timestamps; by default it also pushes the
+  Feishu DM card **and a macOS desktop notification**, `--quiet` returns stdout only).
+  Read-only; safe alongside the daemon. **stdout is a unified JSON envelope
+  `{code, errorMsg, data}`** — success/empty/error are all valid JSON, exit code =
+  `code`. `code: 0` → `data.conversations` is the array (empty array = nothing to
+  summarise in that window); `code != 0` → see `errorMsg`. Parse with `json.loads`
+  and branch on `code`; don't forward raw stdout as human text.
 - `lark-listener config get [KEY] [--json]` — view config (api_key masked).
 - `lark-listener config set KEY VALUE [--add|--remove] [--force]` — non-interactive
   edit; dotted paths (`poll_interval`, `keywords`, `ai.model`, …); protected keys
-  (`ai`/`notify`/`lark_cli_appid`) need `--force`; takes effect next poll.
+  (`ai`/`notify`/`lark_cli_appid`) need `--force`; also refused without `--force`:
+  removing the bot's own chat from `exclude_chat_ids` (anti-feedback-loop guard).
+  Takes effect at the next poll cycle — up to one (old) interval away for large
+  intervals; chat-side edits follow the same cadence. With `poll_interval=0`
+  (auto-polling off) the daemon picks changes up within ~10 min.
+  **Exception: `lark_cli_appid` only takes effect after `lark-listener restart`**
+  (the bot listener subscribes with the profile captured at startup).
 - `lark-listener start | stop | restart` — non-interactive service control.
 - `lark-listener agent-skills install | uninstall` — manage on-machine operating skill.
 - `lark-cli profile list` — enumerate available bots.
@@ -88,9 +110,14 @@ your Bash tool will hang or hit EOF and leave a half-configured install.
 Daily use is **natural-language messages sent to the bot inside Feishu** — these are
 not shell commands: 「汇总」/「总结」/`summary`, 「汇总最近2小时」, 「当前配置」, 「帮助」,
 「轮询间隔改成10分钟」, 「关注关键词 上线」 / 「不要关注 故障」 (reply 「确认」 to apply).
-`ai` / `notify` / `lark_cli_appid` are protected — change them by editing the file,
-not over chat; config edits take effect on the next poll (no restart). Restart is
-only needed after a code upgrade.
+**Owner only**: messages from anyone other than the configured `notify.user_id` are
+silently dropped (no reply, no AI call) — the bot is not a shared trigger.
+`ai` / `notify` / `lark_cli_appid` are protected — change them by editing the file
+or `config set … --force`, not over chat; config edits take effect on the next poll
+(no restart; with `poll_interval=0` within ~10 min). Restart is only needed after a
+code upgrade — or after changing `lark_cli_appid`. Setting `poll_interval` to `0`
+disables auto-polling entirely: the service stays online and the bot still answers
+「汇总」/ config chat, it just stops pushing on a timer; any positive value restores it.
 
 ## Upgrade
 
@@ -101,7 +128,7 @@ lark-listener restart   # required — without it the old code keeps running
 
 ## Troubleshooting
 
-- **Can't fetch messages** → `lark-cli` auth expired → `lark-cli auth login --scope search:message`.
+- **Can't fetch messages** → `lark-cli` auth expired → `lark-cli auth login --profile <configured appid> --scope search:message` (appid: `lark-listener config get lark_cli_appid`).
 - **Bot silent** → `lark-listener status`; if not running → `lark-listener start`.
 - **No desktop notification** → secondary channel only; the bot DM still arrives, safe to ignore.
 - First look: `tail -n 100 ~/.lark_listener/logs/stderr.log`.
@@ -115,5 +142,8 @@ The skill defers to `lark-listener --help` / `doctor` as the source of truth.
 
 ## Paths
 
-- `~/.lark_listener/` — `config.yaml` · `state.json` · `logs/` · `venv/`
+- `~/.lark_listener/` — `config.yaml` · `state.json` · `logs/` · `venv/` ·
+  `shim_link` (records where the short-command symlink actually lives)
+- short-command symlink `lark-listener` — location recorded in `shim_link`
+  (typically `~/.local/bin` or `/opt/homebrew/bin`)
 - `~/Library/LaunchAgents/com.larklistener.plist` — launchd config

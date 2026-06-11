@@ -12,15 +12,12 @@ from lark_listener import service
 
 
 def ai_packages_for(provider: str) -> list[str]:
-    """选定 AI 后端需要 pip 安装的包。
+    """选定 AI 后端需要 pip 安装的包（唯一事实源在 providers.py）。
 
-    ollama 用标准库 urllib 直连（analyzer._call_ollama），无需任何 SDK，故返回空。
-    未知后端也返回空（交由运行时报错，不擅自装包）。
-    """
-    return {
-        "claude": ["anthropic>=0.30.0"],
-        "openai": ["openai>=1.30.0"],
-    }.get(provider, [])
+    ollama 用标准库 urllib 直连，无需任何 SDK，返回空；未知后端也返回空
+    （交由运行时报错，不擅自装包）。"""
+    from lark_listener.providers import pip_packages_for
+    return pip_packages_for(provider)
 
 
 def _venv_python() -> str:
@@ -80,12 +77,30 @@ def build_config_dict(
     }
 
 
+def _parse_poll(raw: str) -> int:
+    """轮询间隔输入 → 非负 int。空=默认 300；非数字回退 300（向导绝不因一次
+    手滑裸 ValueError 终止）；负数按 0（关闭自动轮询）。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return 300
+    try:
+        n = int(raw)
+    except ValueError:
+        print("⚠️ 轮询间隔需为整数秒，已按默认 300 处理")
+        return 300
+    if n < 0:
+        print("⚠️ 轮询间隔不能为负，已按 0（关闭自动轮询）处理")
+        return 0
+    return n
+
+
 def write_config_file(path: str, cfg: dict) -> None:
-    yaml = YAML()
-    yaml.default_flow_style = False
-    yaml.allow_unicode = True
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f)
+    """新建/覆写配置：复用 dump_roundtrip（tmp 0600 创建 + replace 原子写，
+    密钥不落 0644 窗口、断电不留半截文件），并强制收紧到 0600。"""
+    import os
+    from lark_listener.config_editor import dump_roundtrip
+    dump_roundtrip(path, cfg)
+    os.chmod(path, 0o600)
 
 
 def _run_lark(args: list[str], appid: str) -> str:
@@ -113,14 +128,25 @@ def _detect_active_appid() -> tuple[str, str, str]:
     return "", "", ""
 
 
-def cmd_setup() -> None:
+def cmd_setup() -> int:
+    """交互安装向导。返回退出码（0 成功 / 1 前置缺失或用户取消），与其它
+    子命令的退出码约定一致，便于脚本/agent 判断结果。"""
+    try:
+        return _cmd_setup_inner()
+    except (EOFError, KeyboardInterrupt):
+        # stdin 关闭（管道/非交互误跑）或 Ctrl-C：干净取消，不裸 traceback。
+        print("\n已取消 setup")
+        return 1
+
+
+def _cmd_setup_inner() -> int:
     from lark_listener.binaries import lark_cli, resolve_executable
 
     # 0) 前置：lark-cli 必须在场（npm 装的，本工具的前提）
     if not Path(resolve_executable("lark-cli")).is_file():
         print("❌ 未检测到 lark-cli。请先安装并登录：")
         print("   npm install -g @larksuite/cli && lark-cli config init")
-        return
+        return 1
 
     service.LISTENER_HOME.mkdir(parents=True, exist_ok=True)
     (service.LISTENER_HOME / "logs").mkdir(parents=True, exist_ok=True)  # launchd 不建中间目录
@@ -138,10 +164,7 @@ def cmd_setup() -> None:
     cfg_path = service.LISTENER_HOME / "config.yaml"
     if not cfg_path.exists():
         # 2) 配置向导
-        poll = input("轮询间隔（秒，默认 300；填 0 关闭自动轮询、仅按需汇总）: ").strip() or "300"
-        if int(poll) < 0:
-            print("⚠️ 轮询间隔不能为负，已按 0（关闭自动轮询）处理")
-            poll = "0"
+        poll = _parse_poll(input("轮询间隔（秒，默认 300；填 0 关闭自动轮询、仅按需汇总）: "))
         kw_raw = input("关注的关键词（逗号分隔，可空）: ").strip()
         keywords = [k.strip() for k in kw_raw.split(",") if k.strip()] if kw_raw else []
         print("AI 后端：1) openai  2) claude  3) ollama")
@@ -169,19 +192,20 @@ def cmd_setup() -> None:
             bot_chat_id = input("无法自动获取，请手动输入 bot_chat_id (oc_xxx): ").strip()
 
         cfg = build_config_dict(
-            poll_interval=int(poll), appid=chosen, keywords=keywords,
+            poll_interval=poll, appid=chosen, keywords=keywords,
             ai_provider=provider, ai_model=model, ai_key=api_key, ai_base_url=base_url,
             user_id=user_id, bot_chat_id=bot_chat_id,
         )
         write_config_file(str(cfg_path), cfg)
         print("✓ 配置文件已生成")
     else:
-        # 已有配置：仅同步 appid
+        # 已有配置：仅同步 appid。经 dump_roundtrip 原子写（tmp+replace，保持
+        # 文件权限），与其它写回路径一致——直接覆写遇断电会留半截 config。
+        from lark_listener.config_editor import dump_roundtrip
         yaml = YAML()
         data = yaml.load(cfg_path.read_text(encoding="utf-8")) or {}
         data["lark_cli_appid"] = chosen
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            yaml.dump(data, f)
+        dump_roundtrip(cfg_path, data)
         print(f"✓ 已保留配置，lark_cli_appid = {chosen}")
 
     # 2.9) 按所选 AI 后端安装对应 SDK（ollama 无需）。从最终配置读 provider，
@@ -205,7 +229,8 @@ def cmd_setup() -> None:
     # 5) 引导授权：两步检查（对齐旧 bash 向导）——先看是否登录 user 身份，
     #    再用一次窄区间 messages-search 探测 search:message scope 是否真的授权。
     #    登录了但缺 scope 时服务仍拉不到消息，故两者任一不满足都需重新授权。
-    scope = "search:message"
+    from lark_listener.doctor import SEARCH_SCOPE, probe_messages_search
+    scope = SEARCH_SCOPE
     name = _run_lark(["contact", "+get-user", "--jq", ".data.user.name"], chosen).strip()
     needs_login = False
     if not name:
@@ -213,11 +238,8 @@ def cmd_setup() -> None:
         needs_login = True
     else:
         print(f"✓ 已登录: {name}")
-        probe = _run_lark(["im", "+messages-search", "--chat-type", "p2p",
-                           "--start", "2020-01-01T00:00:00+08:00",
-                           "--end", "2020-01-01T00:01:00+08:00",
-                           "--format", "json"], chosen)
-        if '"ok": true' not in probe:
+        # 窄区间真探（与 doctor --deep 共用同一实现，json 判 ok 的理由见彼处）。
+        if not probe_messages_search(chosen):
             print(f"○ 缺少 {scope} 权限（或登录已过期）。")
             needs_login = True
         else:
@@ -229,3 +251,4 @@ def cmd_setup() -> None:
         else:
             print(f"已跳过。稍后可手动运行：lark-cli auth login --profile {chosen} --scope \"{scope}\"")
     print("\n=== 安装完成 ===\n运行 `lark-listener start` 启动服务，给 Bot 发「汇总」可立即触发。")
+    return 0

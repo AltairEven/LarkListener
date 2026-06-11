@@ -445,3 +445,67 @@ def test_cmd_start_skips_skill_refresh_in_dev(monkeypatch, tmp_path):
                         lambda quiet=False: called.__setitem__("n", called["n"] + 1) or 0)
     assert service.cmd_start() == 0
     assert called["n"] == 0  # dev 隔离不碰真机 ~/.claude
+
+
+# --- 二轮 review：stop_service 的 event pkill 按实例隔离 + uninstall EOF ---
+
+SVC_FULL_CFG = ("poll_interval: 300\nkeywords: []\n"
+                "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
+                "notify:\n  user_id: ou\n  bot_chat_id: oc\n"
+                "lark_cli_appid: cli_mine\n")
+
+
+def test_stop_service_event_pkill_scoped_to_appid(monkeypatch, tmp_path):
+    """event 子进程 pkill 必须带配置的 appid：全局 `lark-cli event.*--as bot`
+    会误杀 dev/prod 对方实例和本机其它无关 lark-cli 订阅进程。"""
+    (tmp_path / "config.yaml").write_text(SVC_FULL_CFG, encoding="utf-8")
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    monkeypatch.setattr(service, "PLIST_PATH", tmp_path / "x.plist")
+    calls = []
+    monkeypatch.setattr(service.subprocess, "run",
+                        lambda argv, **kw: calls.append(argv) or MagicMock(returncode=0))
+
+    service.stop_service()
+
+    event_kills = [a for a in calls if a[0] == "pkill" and "event" in a[2]]
+    assert event_kills, "应保留 event 子进程兜底清理"
+    assert all("cli_mine" in a[2] for a in event_kills)
+    assert all("subscribe" in a[2] for a in event_kills)  # 不误杀 event consume
+
+
+def test_stop_service_event_pkill_skipped_without_config(monkeypatch, tmp_path):
+    """配置不可读（appid 未知）时跳过 event pkill——主进程 pkill + SIGTERM
+    信号处理已能回收子进程，宁可少杀不可误杀。"""
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)  # 无 config.yaml
+    monkeypatch.setattr(service, "PLIST_PATH", tmp_path / "x.plist")
+    calls = []
+    monkeypatch.setattr(service.subprocess, "run",
+                        lambda argv, **kw: calls.append(argv) or MagicMock(returncode=0))
+
+    service.stop_service()
+
+    assert not [a for a in calls if a[0] == "pkill" and "event" in a[2]]
+
+
+def test_cmd_uninstall_eof_cancels(monkeypatch):
+    """非交互管道里跑 uninstall（stdin 关闭）→ EOFError 应视为未确认取消，
+    不得裸 traceback。"""
+    def _eof(_prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    assert service.cmd_uninstall() == 1
+
+
+def test_collect_status_event_pids_scoped_to_appid(monkeypatch, tmp_path):
+    """status 的 event 进程列举同样按实例隔离：全局模式会把 dev/prod 对方
+    实例及其它 agent 的订阅进程算进本实例 PID（展示失真）。"""
+    (tmp_path / "config.yaml").write_text(SVC_FULL_CFG, encoding="utf-8")
+    monkeypatch.setattr(service, "LISTENER_HOME", tmp_path)
+    monkeypatch.setattr(service, "PLIST_PATH", tmp_path / "x.plist")
+    patterns = []
+    monkeypatch.setattr(service, "_pids", lambda pat: patterns.append(pat) or [])
+
+    service.collect_status()
+
+    event_pats = [p for p in patterns if "event" in p]
+    assert event_pats and all("cli_mine" in p for p in event_pats)

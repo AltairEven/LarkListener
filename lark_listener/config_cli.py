@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
 from lark_listener import config as config_mod
+from lark_listener.common import listener_home
 from lark_listener.config_editor import (
     PROTECTED, load_roundtrip, dump_roundtrip, _coerce_scalar, _apply_list_op,
+    removes_bot_chat,
 )
 
 MASK = "***"
@@ -19,9 +20,7 @@ MASK = "***"
 def _config_path(path: Optional[str | Path] = None) -> Path:
     if path:
         return Path(path)
-    home = os.environ.get("LARK_LISTENER_HOME")
-    base = Path(home).expanduser() if home else Path.home() / ".lark_listener"
-    return base / "config.yaml"
+    return listener_home() / "config.yaml"
 
 
 def _mask(cfg: dict) -> dict:
@@ -96,6 +95,10 @@ def config_set(key: str, value: str, add: bool = False, remove: bool = False,
         return 1
     current = container[leaf]
     old = current
+    # 手编 `keywords:`（值留空 = null）很常见：已知列表字段（DEFAULTS 中为
+    # list）按空列表处理，否则 --add 被误拒、普通 set 会把列表字段写成字符串。
+    if current is None and isinstance(config_mod.DEFAULTS.get(leaf), list):
+        current = []
 
     if add or remove:
         if not isinstance(current, list):
@@ -110,6 +113,18 @@ def config_set(key: str, value: str, add: bool = False, remove: bool = False,
     if err:
         print(f"❌ {err}")
         return 1
+
+    # 防自反馈守卫（判断与 bot 路径共用 removes_bot_chat）。CLI 是 owner 的
+    # deliberate 操作，--force 保留逃生口。
+    if leaf == "exclude_chat_ids" and not force:
+        try:
+            bot_chat = (data.get("notify") or {}).get("bot_chat_id")
+        except Exception:  # noqa: BLE001
+            bot_chat = ""
+        if removes_bot_chat(bot_chat, current, new_value):
+            print("❌ exclude_chat_ids 中的 bot 会话不可移除（防汇总自反馈循环）；"
+                  "确需移除请加 --force")
+            return 1
 
     container[leaf] = new_value
     try:

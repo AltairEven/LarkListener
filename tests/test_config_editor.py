@@ -202,3 +202,51 @@ def test_render_config_excludes_protected_yaml_block():
 def test_render_help_mentions_protected():
     text = config_editor.render_help()
     assert "ai" in text and "notify" in text
+
+
+# --- 二轮 review：权限保持 / 空文件兜底 / bot 会话保护 ---
+
+import os as _os
+import stat as _stat
+
+
+def test_dump_roundtrip_preserves_mode_600(tmp_path):
+    """config.yaml 含明文 api_key：tmp+replace 不得把用户的 chmod 600
+    静默重置回 644。"""
+    p = tmp_path / "config.yaml"
+    p.write_text("poll_interval: 300\n", encoding="utf-8")
+    _os.chmod(p, 0o600)
+    data = config_editor.load_roundtrip(p)
+    data["poll_interval"] = 600
+    config_editor.dump_roundtrip(p, data)
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_dump_roundtrip_new_file_mode_600(tmp_path):
+    """新建文件默认 0600（配置可能含 api_key）。"""
+    p = tmp_path / "new.yaml"
+    config_editor.dump_roundtrip(p, {"a": 1})
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_apply_changes_empty_file_no_crash(tmp_path):
+    """空 config 文件 load_roundtrip 返回 None，apply_changes 不得 TypeError。"""
+    p = tmp_path / "config.yaml"
+    p.write_text("", encoding="utf-8")
+    result = config_editor.apply_changes(str(p), [{"field": "poll_interval", "op": "set", "value": 600}],
+                           {"poll_interval": 300})
+    assert result.ok
+
+
+def test_plan_rejects_removing_bot_chat_from_exclude():
+    """exclude_chat_ids 里的 bot 会话不可被 bot 指令移除——移除后汇总卡片
+    命中关键词会被自身轮询再次捞起，形成自反馈循环。"""
+    cfg = {"keywords": [], "exclude_chat_ids": ["oc_bot"],
+           "notify": {"user_id": "ou_x", "bot_chat_id": "oc_bot"}}
+    diff, err = config_editor.compute_diff(
+        [{"field": "exclude_chat_ids", "op": "remove", "value": "oc_bot"}], cfg)
+    assert err and ("bot" in err.lower() or "自反馈" in err)
+
+    diff, err = config_editor.compute_diff(
+        [{"field": "exclude_chat_ids", "op": "set", "value": ["oc_other"]}], cfg)
+    assert err is not None  # 整体替换掉 bot 会话同样拒绝

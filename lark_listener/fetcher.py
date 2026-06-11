@@ -242,5 +242,14 @@ class Fetcher:
             return []
 
         # lark-cli wraps results in data.messages or data.items
-        inner = data.get("data", {})
-        return inner.get("messages", inner.get("items", []))
+        # `or {}` 而非 .get 默认值：真实响应见过 `"data": null`。
+        inner = data.get("data") or {}
+        if not isinstance(inner, dict):
+            return []
+        msgs = inner.get("messages", inner.get("items", []))
+        if not isinstance(msgs, list):
+            return []
+        # 入口统一过滤缺 message_id / 非 dict 的脏消息：下游 fetch/analyzer/
+        # poll_once 多处裸取 message_id，且都发生在 state 推进之前——一条脏
+        # 消息会让 last_poll_time 冻结、同窗每轮重拉（毒消息循环）。
+        return [m for m in msgs if isinstance(m, dict) and m.get("message_id")]

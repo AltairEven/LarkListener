@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,11 @@ def set_lark_profile(profile: Optional[str]) -> None:
     _lark_profile = profile or None
 
 
+def get_lark_profile() -> Optional[str]:
+    """当前钉住的 profile（appId），未设返回 None。"""
+    return _lark_profile
+
+
 def lark_cli(*args: str) -> list[str]:
     """Build a ``lark-cli`` argv, pinned to the configured profile if one is set.
 
@@ -59,6 +65,16 @@ def lark_cli(*args: str) -> list[str]:
     if _lark_profile:
         cmd += ["--profile", _lark_profile]
     return cmd
+
+
+def event_subscriber_pkill_pattern(profile: str) -> str:
+    """本实例 event 订阅子进程的 pkill -f（ERE）模式——唯一事实源。
+
+    三要素缺一不可，曾经分写两处时漂移过：subscribe 限定（不误杀同 profile
+    的 `event consume`，其它 agent 会话的真实用法）、--as bot、--profile +
+    结尾锚定（cli_abc 不得匹配 cli_abc123；appid 经 re.escape 防元字符）。
+    """
+    return f"lark-cli event.*subscribe.*--as bot.*--profile {re.escape(profile)}( |$)"
 
 
 # 只缓存「成功解析」的绝对路径，进程内复用。失败不缓存：服务启动早于安装/升级完成

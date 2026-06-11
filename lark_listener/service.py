@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Optional
 from xml.sax.saxutils import escape as _xml_escape
 
+from lark_listener.common import listener_home
+
 # 数据目录与服务标识支持环境变量覆盖，便于开发时与生产隔离（不设则用默认，
 # 行为与原先完全一致）：
 #   LARK_LISTENER_HOME  —— 数据目录（config/state/logs/venv），默认 ~/.lark_listener
 #   LARK_LISTENER_LABEL —— launchd Label，默认 com.larklistener（plist 文件名随之）
-_HOME_ENV = os.environ.get("LARK_LISTENER_HOME")
-LISTENER_HOME = Path(_HOME_ENV).expanduser() if _HOME_ENV else Path.home() / ".lark_listener"
+# import 时冻结一次（与 config/state 的惰性求值不同——本模块的派生常量
+# VENV_DIR/PLIST_PATH 等都基于它，测试也依赖 reload 语义）。
+LISTENER_HOME = listener_home()
 LABEL = os.environ.get("LARK_LISTENER_LABEL", "com.larklistener")
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
@@ -163,7 +166,26 @@ def stop_service() -> None:
     # 按本实例 venv 路径精确匹配，避免 dev 测试与生产互相误杀（进程 cmdline 含
     # venv 内入口绝对路径）。
     subprocess.run(["pkill", "-f", f"{VENV_DIR}/bin/lark-listener run"], capture_output=True)
-    subprocess.run(["pkill", "-f", "lark-cli event.*--as bot"], capture_output=True)
+    # event 子进程兜底清理同样按实例隔离（模式带配置的 appid，对应 cmdline 里
+    # 的 --profile <appid>）：全局 `lark-cli event.*--as bot` 会误杀 dev/prod
+    # 对方实例、以及本机其它无关的 lark-cli 订阅进程。appid 未知（配置缺失/
+    # 损坏）时跳过——上面的主进程 pkill（SIGTERM → 信号处理）已会回收其子进程。
+    appid = _configured_appid()
+    if appid:
+        from lark_listener.binaries import event_subscriber_pkill_pattern
+        subprocess.run(["pkill", "-f", event_subscriber_pkill_pattern(appid)],
+                       capture_output=True)
+
+
+def _configured_appid() -> str:
+    """本实例配置的 lark_cli_appid（best-effort；配置缺失/损坏返回 ''）。
+    stop_service 的 pkill 与 collect_status 的 PID 列举都靠它做实例隔离。"""
+    try:
+        from lark_listener import config as config_mod
+        return str(config_mod.load_config(
+            str(LISTENER_HOME / "config.yaml")).get("lark_cli_appid") or "")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def cmd_start() -> int:
@@ -228,7 +250,15 @@ def collect_status() -> dict:
         state = "stopped"
 
     main_pids = _pids(f"{VENV_DIR}/bin/lark-listener run")
-    event_pids = _pids("lark-cli event.*--as bot")
+    # event 进程列举与 stop_service 同款实例隔离：全局模式会把 dev/prod 对方
+    # 实例及其它 agent 的订阅进程算进本实例（展示失真）。appid 未知时退回
+    # 宽模式（只读展示，无误杀风险）。
+    appid = _configured_appid()
+    if appid:
+        from lark_listener.binaries import event_subscriber_pkill_pattern
+        event_pids = _pids(event_subscriber_pkill_pattern(appid))
+    else:
+        event_pids = _pids("lark-cli event.*subscribe.*--as bot")
 
     shim = _recorded_shim() or str(SHIM_LINK)
     paths = {
@@ -310,7 +340,12 @@ def cmd_config() -> int:
 
 def cmd_uninstall() -> int:
     print(f"⚠️  即将删除服务、launchd 配置、短命令软链与 {LISTENER_HOME}（含 venv、配置、日志）")
-    confirm = input("确认卸载？(y/N) ").strip().lower()
+    try:
+        confirm = input("确认卸载？(y/N) ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        # stdin 关闭（非交互管道误跑）/ Ctrl-C：视为未确认，干净取消。
+        print("\n已取消（未确认）")
+        return 1
     if confirm != "y":
         print("已取消")
         return 0
@@ -324,12 +359,9 @@ def cmd_uninstall() -> int:
     # 删软链：记录的实际位置（install.sh 可能建在 /opt/homebrew/bin 等）+ 默认位置。
     # 必须在 rmtree 之前读取 SHIM_RECORD（它在 LISTENER_HOME 内）。
     links = {SHIM_LINK}
-    try:
-        rec = SHIM_RECORD.read_text().strip()
-        if rec:
-            links.add(Path(rec))
-    except OSError:
-        pass
+    rec = _recorded_shim()
+    if rec:
+        links.add(Path(rec))
     for link in links:
         try:
             if link.is_symlink() or link.exists():

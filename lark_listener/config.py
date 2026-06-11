@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 import yaml
 from pathlib import Path
 from typing import Any, Optional
+
+from lark_listener.common import listener_home
 
 logger = logging.getLogger("lark_listener")
 
@@ -81,12 +82,40 @@ def _normalize_poll_interval(value: Any) -> int:
     return n
 
 
+def _normalize_nonneg_int(value: Any, name: str, default: int) -> int:
+    """钳制为非负 int，坏值回退默认（与 _normalize_poll_interval 同因：手编
+    config 留下 null/字符串时，消费点的数值比较会 TypeError 崩掉每轮 poll）。"""
+    if isinstance(value, bool):
+        logger.warning("%s 配置非法（%r），已回退默认 %s", name, value, default)
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        logger.warning("%s 配置非法（%r），已回退默认 %s", name, value, default)
+        return default
+    if n < 0:
+        # 负数按 0 处理（与 poll_interval 的负数语义一致）：用户写 -1 的
+        # 意图显然是「关掉」，回退默认 20 反而违背意图。
+        logger.warning("%s 为负（%r），按 0 处理", name, value)
+        return 0
+    return n
+
+
+def _normalize_str_list(value: Any, name: str) -> list[str]:
+    """钳制为 list[str]。null → []；标量 → 单元素列表（用户写 `keywords: 上线`
+    的意图是一个关键词，绝不能被消费点逐字符迭代）；列表内 None 丢弃、其余转 str。"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value if x is not None]
+    logger.warning("%s 配置应为列表（实际 %r），已按单元素列表处理", name, value)
+    return [str(value)]
+
+
 def load_config(path: Optional[str] = None) -> dict[str, Any]:
     """Load config from YAML file, applying defaults for missing fields."""
     if path is None:
-        _home = os.environ.get("LARK_LISTENER_HOME")
-        base = Path(_home).expanduser() if _home else Path.home() / ".lark_listener"
-        path = str(base / "config.yaml")
+        path = str(listener_home() / "config.yaml")
 
     config_path = Path(path)
     if not config_path.exists():
@@ -97,5 +126,10 @@ def load_config(path: Optional[str] = None) -> dict[str, Any]:
 
     config = _deep_merge(DEFAULTS, user_config)
     config["poll_interval"] = _normalize_poll_interval(config.get("poll_interval"))
+    config["context_messages"] = _normalize_nonneg_int(
+        config.get("context_messages"), "context_messages", DEFAULTS["context_messages"])
+    config["keywords"] = _normalize_str_list(config.get("keywords"), "keywords")
+    config["exclude_chat_ids"] = _normalize_str_list(
+        config.get("exclude_chat_ids"), "exclude_chat_ids")
     _validate(config)
     return config
