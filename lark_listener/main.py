@@ -16,7 +16,8 @@ from typing import Optional
 from lark_listener.analyzer import Analyzer, estimate_ai_seconds, format_duration
 from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
-from lark_listener.config import load_config
+from lark_listener.chats import ChatRegistry
+from lark_listener.config import load_config, exclude_chat_id_set
 from lark_listener.fetcher import Fetcher
 from lark_listener.notifier import Notifier, build_summary_response, error_response
 from lark_listener.common import TZ
@@ -193,13 +194,30 @@ def _bot_listener():
             time.sleep(5)
 
 
+# 守护进程内跨轮复用同一 registry：refresh 失败时保留上一轮 mute 结果
+# （spec §2 降级）。cmd_summarize 子进程各自新建，首刷失败则全按勿扰。
+_chat_registry: Optional[ChatRegistry] = None
+
+
+def _get_chat_registry(special_enabled: bool) -> ChatRegistry:
+    global _chat_registry
+    if _chat_registry is None:
+        _chat_registry = ChatRegistry(special_enabled=special_enabled)
+    _chat_registry.special_enabled = special_enabled
+    return _chat_registry
+
+
 def _fetch_window(config, start, end, processed_ids):
     """拉取 [start, end) 内的相关消息。返回 (categorized, fetcher)。
-    fetcher 一并返回，供 _analyze_window 取上下文（同一实例）。"""
-    exclude_ids = set(config.get("exclude_chat_ids", []))
-    # 过渡态：registry 接线在后续任务完成；当前 Fetcher 无 registry → 群按勿扰降级。
+    fetcher 一并返回，供 _analyze_window 取上下文与特别关注判定（同一实例）。"""
+    exclude_ids = exclude_chat_id_set(config)
+    sf = config.get("special_focus") or {}
+    registry = _get_chat_registry(bool(sf.get("enabled")))
+    registry.refresh()
     fetcher = Fetcher(
         keywords=config.get("keywords", []),
+        registry=registry,
+        special_max_messages=sf.get("max_messages", 20),
     )
     categorized = fetcher.fetch(
         start, end,
@@ -218,6 +236,15 @@ def _analyze_window(config, fetcher, categorized, start, end, my_user_id):
         ctx_total = sum(len(msgs) for msgs in context.values())
         if ctx_total:
             logger.info("Fetched %d context messages for %d chats", ctx_total, len(context))
+    sf = config.get("special_focus") or {}
+    bound = {c["chat_id"]: c.get("keywords", [])
+             for c in sf.get("chats", [])
+             if isinstance(c, dict) and c.get("chat_id")}
+    registry = getattr(fetcher, "registry", None)
+    special_set = set(registry.special_chat_ids()) if registry else set()
+    all_chat_ids = {m.get("chat_id") for msgs in categorized.values()
+                    for m in msgs if m.get("chat_id")}
+    special_chats = {cid: bound.get(cid, []) for cid in all_chat_ids & special_set}
     ai_cfg = config["ai"]
     analyzer = Analyzer(
         provider=ai_cfg["provider"],
@@ -226,7 +253,8 @@ def _analyze_window(config, fetcher, categorized, start, end, my_user_id):
         base_url=ai_cfg.get("base_url", ""),
         keywords=config.get("keywords", []),
     )
-    return analyzer.analyze(categorized, my_user_id=my_user_id, context=context)
+    return analyzer.analyze(categorized, my_user_id=my_user_id, context=context,
+                            special_chats=special_chats or None)
 
 
 def poll_once(
