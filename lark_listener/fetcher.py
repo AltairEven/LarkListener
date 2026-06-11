@@ -134,27 +134,38 @@ class Fetcher:
         end: datetime,
         limit: int = 20,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Fetch surrounding messages for each chat to provide AI context."""
-        # Collect chat_ids and their matched message_ids
+        """Fetch surrounding messages for each chat to provide AI context.
+
+        合并抓取：所有目标会话 chat_id 逗号分隔、每批 _CHAT_BATCH 个一次调用，
+        拉回后本地按 chat 分组、各截最近 limit 条。特别关注群跳过——其窗口
+        全量已在 SPECIAL 类别里，再拉一遍纯属浪费。
+
+        已知权衡：合并调用共享单次 --page-all 分页预算——批内某个话痨群消息
+        极多时，会挤占同批安静群的上下文（静默变少/为空）。上下文是 AI 的
+        辅助信息（非主消息），且每批仅 10 群，可接受；如需隔离回退逐群调用。"""
+        special_chats = {m.get("chat_id")
+                         for m in categorized.get(MessageCategory.SPECIAL, [])}
         chat_matched_ids: dict[str, set[str]] = {}
         for msgs in categorized.values():
             for msg in msgs:
                 chat_id = msg.get("chat_id", "")
-                if chat_id:
+                if chat_id and chat_id not in special_chats:
                     chat_matched_ids.setdefault(chat_id, set()).add(msg["message_id"])
 
         context: dict[str, list[dict[str, Any]]] = {}
-        for chat_id, matched_ids in chat_matched_ids.items():
-            all_msgs = self._search(start, end, chat_id=chat_id)
-            # Keep up to `limit` most recent messages, excluding already matched
-            # ones. Sort by time before truncating so we keep the latest, not
-            # whatever order lark-cli happened to return.
-            ctx_msgs = [m for m in all_msgs if m["message_id"] not in matched_ids]
-            ctx_msgs.sort(key=lambda m: m.get("create_time", ""))
-            ctx_msgs = ctx_msgs[-limit:]
-            if ctx_msgs:
-                context[chat_id] = ctx_msgs
-
+        # sorted：分块组合确定，单测可断言每批的 chat_id 组成
+        for chunk in _chunked(sorted(chat_matched_ids), _CHAT_BATCH):
+            all_msgs = self._search(start, end, chat_id=",".join(chunk))
+            by_chat: dict[str, list[dict[str, Any]]] = {}
+            for m in all_msgs:
+                by_chat.setdefault(m.get("chat_id", ""), []).append(m)
+            for chat_id in chunk:
+                ctx_msgs = [m for m in by_chat.get(chat_id, [])
+                            if m["message_id"] not in chat_matched_ids[chat_id]]
+                ctx_msgs.sort(key=lambda m: m.get("create_time", ""))
+                ctx_msgs = ctx_msgs[-limit:]
+                if ctx_msgs:
+                    context[chat_id] = ctx_msgs
         return context
 
     def _classify(self, msg: dict) -> ChatClass:

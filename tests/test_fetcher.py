@@ -750,6 +750,92 @@ def test_fetch_context_keeps_latest_after_sorting(mock_run):
     assert ids == ["a", "c"]
 
 
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_merges_chats_into_one_call(mock_run):
+    """多个命中会话的上下文合并为一次 --chat-id 逗号分隔调用，本地分组截断。"""
+    ctx_msgs = [
+        {"message_id": "c1", "chat_id": "oc_1", "sender": {"id": "ou_x", "name": "X"},
+         "msg_type": "text", "content": "ctx1", "create_time": "1716796700"},
+        {"message_id": "c2", "chat_id": "oc_2", "sender": {"id": "ou_y", "name": "Y"},
+         "msg_type": "text", "content": "ctx2", "create_time": "1716796710"},
+    ]
+    mock_run.side_effect = _mock_run([_make_search_result(ctx_msgs)])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [
+        {"message_id": "p1", "chat_id": "oc_1"},
+        {"message_id": "p2", "chat_id": "oc_2"},
+    ]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        limit=20,
+    )
+    assert mock_run.call_count == 1
+    args = mock_run.call_args_list[0][0][0]
+    chat_arg = args[args.index("--chat-id") + 1]
+    assert sorted(chat_arg.split(",")) == ["oc_1", "oc_2"]
+    assert [m["message_id"] for m in context["oc_1"]] == ["c1"]
+    assert [m["message_id"] for m in context["oc_2"]] == ["c2"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_skips_special_chats(mock_run):
+    """特别关注群的全量已在 SPECIAL 类别里，上下文抓取跳过它。"""
+    mock_run.side_effect = _mock_run([_empty_result()])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.SPECIAL] = [{"message_id": "s1", "chat_id": "oc_vip"}]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+    )
+    assert context == {}
+    assert mock_run.call_count == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_per_chat_limit(mock_run):
+    """合并拉回后每会话各自截最近 limit 条。"""
+    ctx_msgs = [{"message_id": f"c{i}", "chat_id": "oc_1",
+                 "sender": {"id": "ou_x", "name": "X"}, "msg_type": "text",
+                 "content": f"m{i}", "create_time": str(1716796700 + i)}
+                for i in range(5)]
+    mock_run.side_effect = _mock_run([_make_search_result(ctx_msgs)])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [{"message_id": "p1", "chat_id": "oc_1"}]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        limit=2,
+    )
+    assert [m["message_id"] for m in context["oc_1"]] == ["c3", "c4"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_chunks_by_ten(mock_run):
+    """>10 个命中会话按每批 10 个分块调用。"""
+    mock_run.side_effect = _mock_run([_empty_result()])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [
+        {"message_id": f"p{i}", "chat_id": f"oc_{i:02d}"} for i in range(11)]
+    fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+    )
+    assert mock_run.call_count == 2
+    first = mock_run.call_args_list[0][0][0]
+    second = mock_run.call_args_list[1][0][0]
+    assert len(first[first.index("--chat-id") + 1].split(",")) == 10
+    assert len(second[second.index("--chat-id") + 1].split(",")) == 1
+
+
 # --- 机器人应用名解析（应用信息 API，2026-06-10 调试定案）---
 
 import lark_listener.fetcher as fetcher_mod
