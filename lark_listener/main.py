@@ -20,7 +20,7 @@ from lark_listener.chats import ChatRegistry
 from lark_listener.config import load_config, exclude_chat_id_set
 from lark_listener.fetcher import Fetcher
 from lark_listener.notifier import Notifier, build_summary_response, error_response
-from lark_listener.common import TZ
+from lark_listener.common import TZ, listener_home
 from lark_listener.state import State
 
 logging.basicConfig(
@@ -227,6 +227,19 @@ def _fetch_window(config, start, end, processed_ids):
     return categorized, fetcher
 
 
+def _autofill_config_names(config_path: Optional[str], fetcher) -> None:
+    """best-effort：补群名 + 迁移旧键。mock/降级（registry 非 ChatRegistry）
+    时跳过——单测的 poll_once 不应碰配置文件。失败仅告警，绝不阻断轮询。"""
+    registry = getattr(fetcher, "registry", None)
+    if not isinstance(registry, ChatRegistry):
+        return
+    path = config_path or str(listener_home() / "config.yaml")
+    try:
+        config_editor.autofill_chat_names(path, registry.name_of)
+    except Exception:  # noqa: BLE001
+        logger.warning("配置补名/迁移失败（忽略，下轮再试）", exc_info=True)
+
+
 def _analyze_window(config, fetcher, categorized, start, end, my_user_id):
     """取上下文 + 调 AI 分析。返回 analysis。"""
     context = {}
@@ -286,6 +299,7 @@ def poll_once(
 
     processed_ids = set() if custom_start else state.processed_message_ids
     categorized, fetcher = _fetch_window(config, start, end, processed_ids)
+    _autofill_config_names(config_path, fetcher)
 
     total = sum(len(msgs) for msgs in categorized.values())
     logger.info("Fetched %d new messages (from %s)", total, start.strftime("%m-%d %H:%M"))

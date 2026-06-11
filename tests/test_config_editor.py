@@ -1,5 +1,8 @@
 from lark_listener import config_editor
-from lark_listener.config_editor import _plan_changes, compute_diff, removes_bot_chat
+from lark_listener.config_editor import (
+    _plan_changes, compute_diff, removes_bot_chat,
+    autofill_chat_names, load_roundtrip,
+)
 
 SAMPLE = """\
 # 轮询间隔
@@ -300,3 +303,62 @@ def test_removes_bot_chat_handles_dict_entries():
     assert removes_bot_chat("oc_bot", cur, cur) is False
     # 旧形态纯 str 仍兼容
     assert removes_bot_chat("oc_bot", ["oc_bot"], []) is True
+
+
+# ---------------------------------------------------------------------------
+# autofill_chat_names
+# ---------------------------------------------------------------------------
+
+def _write_yaml(tmp_path, text):
+    p = tmp_path / "config.yaml"
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+def test_autofill_fills_missing_names(tmp_path):
+    path = _write_yaml(tmp_path, (
+        "exclude_chats:\n"
+        "  - chat_id: oc_a\n"
+        "    name: ''\n"
+        "  - chat_id: oc_b\n"
+        "    name: 已有名\n"
+        "special_focus:\n"
+        "  enabled: true\n"
+        "  chats:\n"
+        "    - chat_id: oc_vip\n"
+        "      name: ''\n"
+        "      keywords: [扩容]\n"
+    ))
+    changed = autofill_chat_names(path, lambda cid: {"oc_a": "A群", "oc_vip": "VIP群"}.get(cid, ""))
+    assert changed is True
+    data = load_roundtrip(path)
+    assert data["exclude_chats"][0]["name"] == "A群"
+    assert data["exclude_chats"][1]["name"] == "已有名"     # 手填不覆盖
+    assert data["special_focus"]["chats"][0]["name"] == "VIP群"
+
+
+def test_autofill_migrates_legacy_exclude_key(tmp_path):
+    path = _write_yaml(tmp_path, (
+        "# 注释要保留\n"
+        "include_at_all: false\n"
+        "exclude_chat_ids:\n"
+        "  - oc_old\n"
+    ))
+    changed = autofill_chat_names(path, lambda cid: "")
+    assert changed is True
+    data = load_roundtrip(path)
+    assert "exclude_chat_ids" not in data
+    assert "include_at_all" not in data
+    assert data["exclude_chats"] == [{"chat_id": "oc_old", "name": ""}]
+    # 注释保留（ruamel round-trip）
+    assert "注释要保留" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
+
+
+def test_autofill_noop_returns_false(tmp_path):
+    path = _write_yaml(tmp_path, "exclude_chats:\n  - chat_id: oc_a\n    name: A群\n")
+    assert autofill_chat_names(path, lambda cid: "新名") is False
+
+
+def test_autofill_resolver_failure_leaves_empty(tmp_path):
+    path = _write_yaml(tmp_path, "exclude_chats:\n  - chat_id: oc_a\n    name: ''\n")
+    assert autofill_chat_names(path, lambda cid: "") is False

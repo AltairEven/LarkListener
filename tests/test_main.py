@@ -1116,3 +1116,14 @@ def test_run_startup_backoff_exits_early_on_stop(mock_cfg, mock_reply, mock_thre
     finally:
         main_mod._running = True
     assert mock_sleep.call_count <= 5
+
+
+def test_autofill_skipped_for_non_registry(monkeypatch, tmp_path):
+    """fetcher.registry 非 ChatRegistry 实例（mock/None）时跳过补名，
+    单测/降级路径不碰配置文件。"""
+    p = tmp_path / "config.yaml"
+    p.write_text("exclude_chats: []\n", encoding="utf-8")
+    class _F:
+        registry = object()
+    main_mod._autofill_config_names(str(p), _F())   # 不抛、不改文件
+    assert p.read_text(encoding="utf-8") == "exclude_chats: []\n"

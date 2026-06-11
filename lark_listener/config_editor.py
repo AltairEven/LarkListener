@@ -281,3 +281,47 @@ def render_help() -> str:
         "  • 汇总消息：「汇总今天的消息」\n"
         "修改会先让你确认，回复「确认」后生效，下次轮询自动应用。"
     )
+
+
+def autofill_chat_names(path: str | Path, name_of) -> bool:
+    """为 exclude_chats / special_focus.chats 中缺 name 的条目补名，并把
+    旧键迁移为新格式（exclude_chat_ids → exclude_chats、删除废键
+    include_at_all）。有变化才原子回写（保注释、保 mode）。
+
+    name_of: chat_id -> str，查不到返回空串（留空下轮再试）。
+    返回是否发生了回写。调用方（poll_once）必须 best-effort 包裹。"""
+    data = load_roundtrip(path)
+    if not isinstance(data, dict):
+        return False
+    changed = False
+    if "exclude_chat_ids" in data and "exclude_chats" not in data:
+        entries = []
+        for x in (data.get("exclude_chat_ids") or []):
+            if isinstance(x, dict) and x.get("chat_id"):
+                entries.append({"chat_id": str(x["chat_id"]),
+                                "name": str(x.get("name") or "")})
+            elif x is not None:
+                entries.append({"chat_id": str(x), "name": ""})
+        data["exclude_chats"] = entries
+        del data["exclude_chat_ids"]
+        changed = True
+    if "include_at_all" in data:
+        del data["include_at_all"]
+        changed = True
+
+    def _fill(entries):
+        nonlocal changed
+        for e in entries or []:
+            if isinstance(e, dict) and e.get("chat_id") and not e.get("name"):
+                name = name_of(str(e["chat_id"])) or ""
+                if name:
+                    e["name"] = name
+                    changed = True
+
+    _fill(data.get("exclude_chats"))
+    sf = data.get("special_focus")
+    if isinstance(sf, dict):
+        _fill(sf.get("chats"))
+    if changed:
+        dump_roundtrip(path, data)
+    return changed
