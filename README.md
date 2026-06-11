@@ -166,6 +166,8 @@ lark-listener restart
 
 > 升级后一定要 `restart`，否则跑的还是旧代码。
 
+旧版配置（`exclude_chat_ids`、`include_at_all`）无需手动修改：服务读取时自动兼容，并在首次轮询时把配置文件自动迁移为新格式（`exclude_chats` + 移除废弃键，注释保留）。
+
 ## 七、出问题了？
 
 想一次性自检，可跑 `lark-listener doctor`——它会逐项检查配置、`lark-cli`、服务状态、上次轮询时效、AI 后端，并对有问题的项给出修复建议。注意浅检验不出授权过期：**怀疑授权问题或「收不到汇总」时跑 `lark-listener doctor --deep`**，它会真实探测 `search:message` 授权与 AI 后端连通。
