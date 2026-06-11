@@ -54,7 +54,11 @@ class Fetcher:
             mid = msg["message_id"]
             if mid not in seen_ids and msg.get("chat_id") not in _exclude:
                 content = msg.get("content", "")
-                is_at_all = "@everyone" in content or "@所有人" in content or "@all" in content
+                # "@_all" 是飞书原始 content 的 @所有人 占位符（搜索 API 的
+                # is_at_me 把 @所有人 也算「@我」返回）；漏掉它会让 @所有人
+                # 误入 AT_ME，绕过 include_at_all=False。
+                is_at_all = ("@everyone" in content or "@所有人" in content
+                             or "@all" in content or "@_all" in content)
                 if is_at_all and not self.include_at_all:
                     # Skip AT_ALL but don't mark as seen,
                     # so keyword search can still pick it up

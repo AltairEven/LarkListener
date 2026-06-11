@@ -127,6 +127,22 @@ def test_build_summary_only_self_messages_returns_empty():
     assert text == ""
 
 
+def test_build_summary_drops_all_self_conversation_group():
+    """搜索会捞回自己发出的 p2p 消息；某会话整组皆自发时该组必须被丢弃，
+    而不是因为窗口里其它会话有别人消息就跟着渲染（真实案例：无名「私聊：查看」行）。"""
+    messages = {
+        MessageCategory.P2P: [
+            _make_msg("msg_self", "oc_self", MY_USER_ID, "我", "小杰和亚亚在一起吗"),
+            _make_msg("msg_001", "oc_p2p1", "ou_zhangsan", "张三", "线上挂了"),
+        ],
+        MessageCategory.AT_ME: [],
+        MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
+    }
+    convs = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)["data"]["conversations"]
+    assert [c["chat_id"] for c in convs] == ["oc_p2p1"]
+
+
 def test_build_summary_without_analysis():
     """Should still produce output even without AI analysis."""
     text = build_summary_text_legacy(SAMPLE_MESSAGES, {}, "15:00", "15:30", MY_USER_ID)

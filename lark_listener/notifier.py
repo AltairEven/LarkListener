@@ -173,23 +173,23 @@ def build_summary_response(
 
     Success is always code 0; an empty/all-self window yields conversations: [].
     """
-    groups = _group_by_chat(categorized)
-    has_others = any(
-        m.get("sender", {}).get("id", "") != my_user_id
-        for g in groups.values()
-        for m in g["messages"]
-    )
+    # 纯自发会话组整组丢弃：搜索会捞回自己发出的消息，而 [我] 的消息按
+    # 约定仅作上下文（analyzer prompt），不构成待办——按组过滤而非全窗口
+    # 判断，否则只要别处有来件，全是自己发言的会话也会渲染成无名行。
+    groups = {
+        cid: g for cid, g in _group_by_chat(categorized).items()
+        if any(m.get("sender", {}).get("id", "") != my_user_id for m in g["messages"])
+    }
 
     conversations: list[dict[str, Any]] = []
-    if has_others:
-        for cat, label in _CATEGORY_ORDER:
-            cat_groups = [g for g in groups.values() if g["category"] == cat]
-            # Urgent conversations first within each category.
-            cat_groups.sort(
-                key=lambda g: 0 if analysis.get(g["chat_id"]) and analysis[g["chat_id"]].urgency == "urgent" else 1,
-            )
-            for group in cat_groups:
-                conversations.append(_conversation_row(group, label, analysis, my_user_id))
+    for cat, label in _CATEGORY_ORDER:
+        cat_groups = [g for g in groups.values() if g["category"] == cat]
+        # Urgent conversations first within each category.
+        cat_groups.sort(
+            key=lambda g: 0 if analysis.get(g["chat_id"]) and analysis[g["chat_id"]].urgency == "urgent" else 1,
+        )
+        for group in cat_groups:
+            conversations.append(_conversation_row(group, label, analysis, my_user_id))
 
     return {
         "code": 0,

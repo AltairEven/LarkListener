@@ -162,6 +162,37 @@ def test_fetch_at_all_disabled_skips_at_all(mock_run):
 
 
 @patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_at_all_placeholder_content(mock_run):
+    """飞书原始 content 的 @所有人 占位符是 "@_all"（真实数据，2026-06-11），
+    必须归类为 AT_ALL 而非 AT_ME——否则 include_at_all=False 拦不住它。"""
+    at_all_msgs = [
+        {
+            "message_id": "msg_all_ph",
+            "chat_id": "oc_group",
+            "chat_name": "团建群",
+            "sender": {"id": "ou_a", "name": "A"},
+            "msg_type": "text",
+            "content": "@_all",
+            "create_time": "1716796800",
+        },
+    ]
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                        # p2p
+        _make_search_result(at_all_msgs),       # at_me (includes @all)
+        _empty_result(),                        # keyword
+    ])
+    fetcher = Fetcher(keywords=["测试"], include_at_all=False)
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+
+    assert len(result[MessageCategory.AT_ME]) == 0
+    assert len(result[MessageCategory.AT_ALL]) == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
 def test_fetch_at_all_disabled_but_keyword_matches(mock_run):
     """When include_at_all=False, @everyone messages can still be found by keyword search."""
     at_all_msg = {
