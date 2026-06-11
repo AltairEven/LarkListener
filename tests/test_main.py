@@ -560,7 +560,7 @@ def test_main_agent_skills_uninstall_dispatch(monkeypatch):
 def test_fetch_window_returns_categorized_and_fetcher(MockFetcher):
     fetcher = MockFetcher.return_value
     fetcher.fetch.return_value = {"cat": [{"message_id": "m1"}]}
-    config = {"keywords": ["k"], "include_at_all": True, "exclude_chat_ids": ["oc_x"]}
+    config = {"keywords": ["k"], "exclude_chats": [{"chat_id": "oc_x", "name": ""}]}
     start = datetime(2026, 6, 9, 10, 0, tzinfo=main_mod.TZ)
     end = datetime(2026, 6, 9, 11, 0, tzinfo=main_mod.TZ)
     categorized, returned = main_mod._fetch_window(config, start, end, set())
@@ -1006,6 +1006,99 @@ def test_kill_stale_event_subscribers_skips_without_profile(mock_run):
     mock_run.assert_not_called()
 
 
+# --- Task 7: registry 接线 ---
+
+from lark_listener.common import TZ
+
+
+class _FakeRegistry:
+    def __init__(self, special_enabled=False):
+        self.special_enabled = special_enabled
+    def refresh(self):
+        return False
+    def classify(self, chat_id, chat_type):
+        from lark_listener.chats import ChatClass
+        return ChatClass.MUTED if chat_type == "group" else ChatClass.NORMAL
+    def special_chat_ids(self):
+        return []
+    def name_of(self, chat_id):
+        return ""
+
+
+@pytest.fixture(autouse=True)
+def _stub_chat_registry(monkeypatch):
+    """poll_once/_fetch_window 不真发 chat-list；每个用例重置全局 registry。"""
+    monkeypatch.setattr(main_mod, "_chat_registry", None, raising=False)
+    monkeypatch.setattr(main_mod, "ChatRegistry", _FakeRegistry, raising=False)
+    yield
+    main_mod._chat_registry = None
+
+
+def test_fetch_window_builds_registry_and_fetcher(tmp_path, monkeypatch):
+    """_fetch_window：建 registry、refresh、按 special_focus 配置组装 Fetcher。"""
+    captured = {}
+
+    class _SpyFetcher:
+        def __init__(self, keywords=None, registry=None, special_max_messages=20):
+            captured["keywords"] = keywords
+            captured["registry"] = registry
+            captured["special_max_messages"] = special_max_messages
+        def fetch(self, start, end, processed_ids, exclude_chat_ids=None):
+            captured["exclude"] = exclude_chat_ids
+            return {cat: [] for cat in MessageCategory}
+
+    monkeypatch.setattr(main_mod, "Fetcher", _SpyFetcher)
+    config = {
+        "keywords": ["SDK"],
+        "exclude_chats": [{"chat_id": "oc_bot", "name": ""}],
+        "special_focus": {"enabled": True, "max_messages": 5, "chats": []},
+    }
+    start = datetime(2026, 6, 11, 10, 0, tzinfo=TZ)
+    end = datetime(2026, 6, 11, 11, 0, tzinfo=TZ)
+    main_mod._fetch_window(config, start, end, set())
+    assert isinstance(captured["registry"], _FakeRegistry)
+    assert captured["registry"].special_enabled is True
+    assert captured["special_max_messages"] == 5
+    assert captured["exclude"] == {"oc_bot"}
+
+
+def test_analyze_window_passes_special_chats(monkeypatch):
+    """_analyze_window：把「出现在本轮且属特别关注」的会话与绑定词传给 analyzer。"""
+    captured = {}
+
+    class _SpyAnalyzer:
+        def __init__(self, **kwargs):
+            pass
+        def analyze(self, categorized, my_user_id="", context=None, special_chats=None):
+            captured["special_chats"] = special_chats
+            return {}
+
+    monkeypatch.setattr(main_mod, "Analyzer", _SpyAnalyzer)
+
+    class _Reg(_FakeRegistry):
+        def special_chat_ids(self):
+            return ["oc_vip", "oc_quiet_this_round"]
+
+    class _F:
+        registry = _Reg()
+        def fetch_context(self, *a, **k):
+            return {}
+
+    config = {
+        "context_messages": 0,
+        "ai": {"provider": "claude", "model": "m"},
+        "special_focus": {"enabled": True, "max_messages": 20,
+                          "chats": [{"chat_id": "oc_vip", "name": "", "keywords": ["扩容"]}]},
+    }
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.SPECIAL] = [{"message_id": "m1", "chat_id": "oc_vip"}]
+    start = datetime(2026, 6, 11, 10, 0, tzinfo=TZ)
+    end = datetime(2026, 6, 11, 11, 0, tzinfo=TZ)
+    main_mod._analyze_window(config, _F(), categorized, start, end, "ou_me")
+    # 只包含本轮出现的特别关注会话；绑定词跟随
+    assert captured["special_chats"] == {"oc_vip": ["扩容"]}
+
+
 @patch("lark_listener.main.time.sleep")
 @patch("lark_listener.main.threading.Thread")
 @patch("lark_listener.main._reply_bot")
@@ -1023,3 +1116,14 @@ def test_run_startup_backoff_exits_early_on_stop(mock_cfg, mock_reply, mock_thre
     finally:
         main_mod._running = True
     assert mock_sleep.call_count <= 5
+
+
+def test_autofill_skipped_for_non_registry(monkeypatch, tmp_path):
+    """fetcher.registry 非 ChatRegistry 实例（mock/None）时跳过补名，
+    单测/降级路径不碰配置文件。"""
+    p = tmp_path / "config.yaml"
+    p.write_text("exclude_chats: []\n", encoding="utf-8")
+    class _F:
+        registry = object()
+    main_mod._autofill_config_names(str(p), _F())   # 不抛、不改文件
+    assert p.read_text(encoding="utf-8") == "exclude_chats: []\n"

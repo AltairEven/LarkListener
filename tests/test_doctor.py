@@ -251,3 +251,57 @@ def test_check_lark_cli_list_of_nondict_profiles_not_misjudged(monkeypatch):
         stdout = '["cli_mine", "cli_other"]'
     c = doctor.check_lark_cli(run=lambda *a, **k: _R(), appid="cli_mine")
     assert c.status == "ok"
+
+
+# --- special_focus 体检 ---
+
+from lark_listener.doctor import check_special_focus
+
+
+def _cfg_sf(enabled=True, chats=None):
+    return {"lark_cli_appid": "cli_x",
+            "special_focus": {"enabled": enabled, "max_messages": 20,
+                              "chats": chats or []}}
+
+
+def test_special_focus_disabled_ok():
+    c = check_special_focus(_cfg_sf(enabled=False))
+    assert c.status == "ok" and "未启用" in c.detail
+
+
+def test_special_focus_shallow_ok():
+    c = check_special_focus(_cfg_sf(chats=[{"chat_id": "oc_a", "name": "", "keywords": []}]))
+    assert c.status == "ok" and "--deep" in c.detail
+
+
+def _fake_run_unmuted(chat_ids):
+    import json as _json
+    def run(args, **kwargs):
+        class R:
+            returncode = 0
+            stdout = _json.dumps({"ok": True, "data": {
+                "chats": [{"chat_id": cid, "name": cid} for cid in chat_ids],
+                "has_more": False, "page_token": ""}})
+        return R()
+    return run
+
+
+def test_special_focus_deep_warns_muted_binding():
+    c = check_special_focus(
+        _cfg_sf(chats=[{"chat_id": "oc_muted", "name": "勿扰群", "keywords": ["x"]}]),
+        deep=True, run=_fake_run_unmuted(["oc_other"]))
+    assert c.status == "warn" and "勿扰群" in c.detail
+
+
+def test_special_focus_deep_probe_failure():
+    def bad_run(args, **kwargs):
+        raise OSError("no cli")
+    c = check_special_focus(_cfg_sf(), deep=True, run=bad_run)
+    assert c.status == "fail"
+
+
+def test_special_focus_deep_all_unmuted_ok():
+    c = check_special_focus(
+        _cfg_sf(chats=[{"chat_id": "oc_vip", "name": "VIP", "keywords": []}]),
+        deep=True, run=_fake_run_unmuted(["oc_vip"]))
+    assert c.status == "ok"

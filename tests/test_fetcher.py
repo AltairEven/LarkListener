@@ -2,6 +2,7 @@ import json
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 from lark_listener.fetcher import Fetcher, MessageCategory
+from lark_listener.chats import ChatRegistry
 
 TZ = timezone(timedelta(hours=8))
 
@@ -53,6 +54,13 @@ def _mock_run(results: list):
     return side_effect
 
 
+def _registry(unmuted: dict, special: bool = False) -> ChatRegistry:
+    """直接预置未免打扰集合的 registry（不发 refresh 请求）。"""
+    r = ChatRegistry(special_enabled=special)
+    r._unmuted = dict(unmuted)
+    return r
+
+
 # --- Basic fetch tests ---
 
 
@@ -102,7 +110,7 @@ def test_fetch_at_me_messages(mock_run):
 
 @patch("lark_listener.fetcher.subprocess.run")
 def test_fetch_at_all_messages(mock_run):
-    """Messages containing @everyone should be classified as AT_ALL."""
+    """Messages containing @everyone in unmuted group should be classified as AT_ALL."""
     at_all_msgs = [
         {
             "message_id": "msg_all",
@@ -112,6 +120,7 @@ def test_fetch_at_all_messages(mock_run):
             "msg_type": "text",
             "content": "全员通知 @everyone 请查看",
             "create_time": "1716796800",
+            "chat_type": "group",
         },
     ]
     mock_run.side_effect = _mock_run([
@@ -119,7 +128,7 @@ def test_fetch_at_all_messages(mock_run):
         _make_search_result(at_all_msgs),       # at_me (includes @all)
         _empty_result(),                        # keyword
     ])
-    fetcher = Fetcher(keywords=["测试"])
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({"oc_group": "全员群"}))
     result = fetcher.fetch(
         datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
         datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
@@ -132,8 +141,8 @@ def test_fetch_at_all_messages(mock_run):
 
 
 @patch("lark_listener.fetcher.subprocess.run")
-def test_fetch_at_all_disabled_skips_at_all(mock_run):
-    """When include_at_all=False, @everyone messages should be skipped."""
+def test_fetch_at_all_muted_group_skipped(mock_run):
+    """勿扰群的 @all 消息应被跳过（不归 AT_ALL/AT_ME）。"""
     at_all_msgs = [
         {
             "message_id": "msg_all",
@@ -143,6 +152,7 @@ def test_fetch_at_all_disabled_skips_at_all(mock_run):
             "msg_type": "text",
             "content": "全员通知 @everyone 请查看",
             "create_time": "1716796800",
+            "chat_type": "group",
         },
     ]
     mock_run.side_effect = _mock_run([
@@ -150,7 +160,7 @@ def test_fetch_at_all_disabled_skips_at_all(mock_run):
         _make_search_result(at_all_msgs),       # at_me (includes @all)
         _empty_result(),                        # keyword
     ])
-    fetcher = Fetcher(keywords=["测试"], include_at_all=False)
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({}))
     result = fetcher.fetch(
         datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
         datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
@@ -164,7 +174,7 @@ def test_fetch_at_all_disabled_skips_at_all(mock_run):
 @patch("lark_listener.fetcher.subprocess.run")
 def test_fetch_at_all_placeholder_content(mock_run):
     """飞书原始 content 的 @所有人 占位符是 "@_all"（真实数据，2026-06-11），
-    必须归类为 AT_ALL 而非 AT_ME——否则 include_at_all=False 拦不住它。"""
+    勿扰群的该消息须被跳过（不归 AT_ALL/AT_ME）。"""
     at_all_msgs = [
         {
             "message_id": "msg_all_ph",
@@ -174,6 +184,7 @@ def test_fetch_at_all_placeholder_content(mock_run):
             "msg_type": "text",
             "content": "@_all",
             "create_time": "1716796800",
+            "chat_type": "group",
         },
     ]
     mock_run.side_effect = _mock_run([
@@ -181,7 +192,7 @@ def test_fetch_at_all_placeholder_content(mock_run):
         _make_search_result(at_all_msgs),       # at_me (includes @all)
         _empty_result(),                        # keyword
     ])
-    fetcher = Fetcher(keywords=["测试"], include_at_all=False)
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({}))
     result = fetcher.fetch(
         datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
         datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
@@ -193,8 +204,8 @@ def test_fetch_at_all_placeholder_content(mock_run):
 
 
 @patch("lark_listener.fetcher.subprocess.run")
-def test_fetch_at_all_disabled_but_keyword_matches(mock_run):
-    """When include_at_all=False, @everyone messages can still be found by keyword search."""
+def test_fetch_at_all_muted_group_keyword_rescues(mock_run):
+    """勿扰群 @all 消息命中关键词后以 KEYWORD 身份进入（不标 seen 则关键词可捞）。"""
     at_all_msg = {
         "message_id": "msg_all",
         "chat_id": "oc_group",
@@ -203,13 +214,14 @@ def test_fetch_at_all_disabled_but_keyword_matches(mock_run):
         "msg_type": "text",
         "content": "部署完成 @everyone 请验证",
         "create_time": "1716796800",
+        "chat_type": "group",
     }
     mock_run.side_effect = _mock_run([
         _empty_result(),                         # p2p
         _make_search_result([at_all_msg]),        # at_me (includes @all)
         _make_search_result([at_all_msg]),        # keyword "部署" finds same msg
     ])
-    fetcher = Fetcher(keywords=["部署"], include_at_all=False)
+    fetcher = Fetcher(keywords=["部署"], registry=_registry({}))
     result = fetcher.fetch(
         datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
         datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
@@ -219,6 +231,154 @@ def test_fetch_at_all_disabled_but_keyword_matches(mock_run):
     assert len(result[MessageCategory.AT_ALL]) == 0
     assert len(result[MessageCategory.KEYWORD]) == 1
     assert result[MessageCategory.KEYWORD][0]["matched_keyword"] == "部署"
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_special_sweep_collects_remaining(mock_run):
+    """特别关注群：窗口内剩余消息（未被前面类别认领）整体进 SPECIAL。"""
+    special_msgs = [
+        {"message_id": "m1", "chat_id": "oc_vip", "chat_name": "VIP群",
+         "sender": {"id": "ou_a", "name": "A"}, "msg_type": "text",
+         "content": "随便聊聊", "create_time": "1716796800", "chat_type": "group"},
+        {"message_id": "m2", "chat_id": "oc_vip", "chat_name": "VIP群",
+         "sender": {"id": "ou_b", "name": "B"}, "msg_type": "text",
+         "content": "继续聊", "create_time": "1716796900", "chat_type": "group"},
+    ]
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                       # p2p
+        _empty_result(),                       # at_me
+        _empty_result(),                       # keyword "测试"
+        _make_search_result(special_msgs),     # special sweep（合并调用）
+    ])
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({"oc_vip": "VIP群"}, special=True))
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert [m["message_id"] for m in result[MessageCategory.SPECIAL]] == ["m1", "m2"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_keyword_skips_special_chat(mock_run):
+    """归类优先级：特别关注 > 关键词——特别关注群命中关键词的消息归 SPECIAL。"""
+    kw_msg = {"message_id": "m_kw", "chat_id": "oc_vip", "chat_name": "VIP群",
+              "sender": {"id": "ou_a", "name": "A"}, "msg_type": "text",
+              "content": "部署完成", "create_time": "1716796800", "chat_type": "group"}
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                       # p2p
+        _empty_result(),                       # at_me
+        _make_search_result([kw_msg]),         # keyword "部署" 命中特别关注群
+        _make_search_result([kw_msg]),         # special sweep 捞回同一条
+    ])
+    fetcher = Fetcher(keywords=["部署"], registry=_registry({"oc_vip": "VIP群"}, special=True))
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert len(result[MessageCategory.KEYWORD]) == 0
+    assert [m["message_id"] for m in result[MessageCategory.SPECIAL]] == ["m_kw"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_at_all_in_special_chat_stays_at_all(mock_run):
+    """归类优先级：@所有人 > 特别关注——特别关注群的 @all 仍单列 AT_ALL。"""
+    at_all = {"message_id": "m_all", "chat_id": "oc_vip", "chat_name": "VIP群",
+              "sender": {"id": "ou_a", "name": "A"}, "msg_type": "text",
+              "content": "@_all", "create_time": "1716796800", "chat_type": "group"}
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                       # p2p
+        _make_search_result([at_all]),         # at_me（含 @all）
+        _empty_result(),                       # keyword
+        _empty_result(),                       # special sweep
+    ])
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({"oc_vip": "VIP群"}, special=True))
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert [m["message_id"] for m in result[MessageCategory.AT_ALL]] == ["m_all"]
+    assert len(result[MessageCategory.SPECIAL]) == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_at_me_in_special_chat_not_duplicated(mock_run):
+    """特别关注群里 @我 的消息归 AT_ME 后，sweep 经 seen_ids 跳过不重复收。"""
+    at_me = {"message_id": "m_at", "chat_id": "oc_vip", "chat_name": "VIP群",
+             "sender": {"id": "ou_a", "name": "A"}, "msg_type": "text",
+             "content": "@你 看一下", "create_time": "1716796800", "chat_type": "group"}
+    mock_run.side_effect = _mock_run([
+        _empty_result(),                       # p2p
+        _make_search_result([at_me]),          # at_me
+        _empty_result(),                       # keyword
+        _make_search_result([at_me]),          # special sweep 捞回同一条
+    ])
+    fetcher = Fetcher(keywords=["测试"], registry=_registry({"oc_vip": "VIP群"}, special=True))
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert [m["message_id"] for m in result[MessageCategory.AT_ME]] == ["m_at"]
+    assert len(result[MessageCategory.SPECIAL]) == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_special_truncates_to_max_messages(mock_run):
+    """每群截最近 special_max_messages 条（保最新）。"""
+    msgs = [{"message_id": f"m{i}", "chat_id": "oc_vip", "chat_name": "VIP群",
+             "sender": {"id": "ou_a", "name": "A"}, "msg_type": "text",
+             "content": f"msg{i}", "create_time": str(1716796800 + i),
+             "chat_type": "group"} for i in range(5)]
+    mock_run.side_effect = _mock_run([
+        _empty_result(), _empty_result(), _empty_result(),   # p2p / at_me / keyword
+        _make_search_result(msgs),                            # special sweep
+    ])
+    fetcher = Fetcher(keywords=["测试"], special_max_messages=2,
+                      registry=_registry({"oc_vip": "VIP群"}, special=True))
+    result = fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    assert [m["message_id"] for m in result[MessageCategory.SPECIAL]] == ["m3", "m4"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_special_sweep_chunks_by_ten(mock_run):
+    """>10 个特别关注群按每批 10 个分块合并调用。"""
+    unmuted = {f"oc_{i:02d}": f"群{i}" for i in range(11)}
+    mock_run.side_effect = _mock_run([_empty_result()])  # 所有调用都返回空
+    fetcher = Fetcher(keywords=[], registry=_registry(unmuted, special=True))
+    fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+    )
+    # p2p + at_me + 2 个 special 分块 = 4 次调用（keywords 为空）
+    assert mock_run.call_count == 4
+    chunk_args = [c[0][0] for c in mock_run.call_args_list[2:]]
+    assert "--chat-id" in chunk_args[0]
+    first_ids = chunk_args[0][chunk_args[0].index("--chat-id") + 1]
+    second_ids = chunk_args[1][chunk_args[1].index("--chat-id") + 1]
+    assert len(first_ids.split(",")) == 10 and len(second_ids.split(",")) == 1
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_special_respects_exclude(mock_run):
+    """排除优先：exclude 的群即使未免打扰也不做特别关注抓取。"""
+    mock_run.side_effect = _mock_run([_empty_result()])
+    fetcher = Fetcher(keywords=[], registry=_registry({"oc_vip": "VIP群"}, special=True))
+    fetcher.fetch(
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        processed_ids=set(),
+        exclude_chat_ids={"oc_vip"},
+    )
+    # 仅 p2p + at_me 两次调用，无 special 分块
+    assert mock_run.call_count == 2
 
 
 @patch("lark_listener.fetcher.subprocess.run")
@@ -450,7 +610,7 @@ def test_multiple_keywords(mock_run):
 # --- Fill chat names tests ---
 
 
-@patch("lark_listener.fetcher.subprocess.run")
+@patch("lark_listener.binaries.subprocess.run")
 def test_fill_chat_names(mock_run):
     """Messages with empty chat_name should get names filled via lookup."""
     msg_no_name = [{
@@ -588,6 +748,92 @@ def test_fetch_context_keeps_latest_after_sorting(mock_run):
     # Excludes m_match; of [a(300), c(900), b(100)] the latest 2 are a and c
     ids = [m["message_id"] for m in context["oc_x"]]
     assert ids == ["a", "c"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_merges_chats_into_one_call(mock_run):
+    """多个命中会话的上下文合并为一次 --chat-id 逗号分隔调用，本地分组截断。"""
+    ctx_msgs = [
+        {"message_id": "c1", "chat_id": "oc_1", "sender": {"id": "ou_x", "name": "X"},
+         "msg_type": "text", "content": "ctx1", "create_time": "1716796700"},
+        {"message_id": "c2", "chat_id": "oc_2", "sender": {"id": "ou_y", "name": "Y"},
+         "msg_type": "text", "content": "ctx2", "create_time": "1716796710"},
+    ]
+    mock_run.side_effect = _mock_run([_make_search_result(ctx_msgs)])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [
+        {"message_id": "p1", "chat_id": "oc_1"},
+        {"message_id": "p2", "chat_id": "oc_2"},
+    ]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        limit=20,
+    )
+    assert mock_run.call_count == 1
+    args = mock_run.call_args_list[0][0][0]
+    chat_arg = args[args.index("--chat-id") + 1]
+    assert sorted(chat_arg.split(",")) == ["oc_1", "oc_2"]
+    assert [m["message_id"] for m in context["oc_1"]] == ["c1"]
+    assert [m["message_id"] for m in context["oc_2"]] == ["c2"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_skips_special_chats(mock_run):
+    """特别关注群的全量已在 SPECIAL 类别里，上下文抓取跳过它。"""
+    mock_run.side_effect = _mock_run([_empty_result()])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.SPECIAL] = [{"message_id": "s1", "chat_id": "oc_vip"}]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+    )
+    assert context == {}
+    assert mock_run.call_count == 0
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_per_chat_limit(mock_run):
+    """合并拉回后每会话各自截最近 limit 条。"""
+    ctx_msgs = [{"message_id": f"c{i}", "chat_id": "oc_1",
+                 "sender": {"id": "ou_x", "name": "X"}, "msg_type": "text",
+                 "content": f"m{i}", "create_time": str(1716796700 + i)}
+                for i in range(5)]
+    mock_run.side_effect = _mock_run([_make_search_result(ctx_msgs)])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [{"message_id": "p1", "chat_id": "oc_1"}]
+    context = fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+        limit=2,
+    )
+    assert [m["message_id"] for m in context["oc_1"]] == ["c3", "c4"]
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_fetch_context_chunks_by_ten(mock_run):
+    """>10 个命中会话按每批 10 个分块调用。"""
+    mock_run.side_effect = _mock_run([_empty_result()])
+    fetcher = Fetcher(keywords=[])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [
+        {"message_id": f"p{i}", "chat_id": f"oc_{i:02d}"} for i in range(11)]
+    fetcher.fetch_context(
+        categorized,
+        datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ),
+        datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ),
+    )
+    assert mock_run.call_count == 2
+    first = mock_run.call_args_list[0][0][0]
+    second = mock_run.call_args_list[1][0][0]
+    assert len(first[first.index("--chat-id") + 1].split(",")) == 10
+    assert len(second[second.index("--chat-id") + 1].split(",")) == 1
 
 
 # --- 机器人应用名解析（应用信息 API，2026-06-10 调试定案）---

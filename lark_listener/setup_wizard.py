@@ -63,16 +63,17 @@ def build_config_dict(
     return {
         "poll_interval": poll_interval,
         "lark_cli_appid": appid,
-        "include_at_all": True,
         "context_messages": 20,
         "keywords": list(keywords),
+        "special_focus": {"enabled": False, "max_messages": 20, "chats": []},
         "ai": {
             "provider": ai_provider,
             "model": ai_model,
             "api_key": ai_key,
             "base_url": ai_base_url,
         },
-        "exclude_chat_ids": [bot_chat_id],
+        # bot 自身会话默认排除（防汇总自反馈）；name 直接写死——它就是本服务的 bot
+        "exclude_chats": [{"chat_id": bot_chat_id, "name": "LarkListener Bot"}],
         "notify": {"user_id": user_id, "bot_chat_id": bot_chat_id},
     }
 

@@ -71,8 +71,10 @@ def _write_cfg(tmp_path):
     p.write_text(
         "poll_interval: 300\n"
         "keywords:\n  - 上线\n"
+        "exclude_chats:\n  - chat_id: oc_bot\n    name: ''\n"
+        "special_focus:\n  enabled: false\n  max_messages: 20\n  chats: []\n"
         "ai:\n  provider: claude\n  model: m\n  api_key: secret\n  base_url: ''\n"
-        "notify:\n  user_id: ou_x\n  bot_chat_id: oc_y\n"
+        "notify:\n  user_id: ou_x\n  bot_chat_id: oc_bot\n"
         "lark_cli_appid: cli_x\n",
         encoding="utf-8",
     )
@@ -179,16 +181,44 @@ def test_config_set_null_list_plain_set_makes_list(tmp_path):
 
 
 def test_config_set_remove_bot_chat_blocked_without_force(tmp_path):
-    """CLI 路径同样不能把 bot 会话移出 exclude_chat_ids（SKILL.md 教 agent
-    用的正是这条路径）；--force 保留 owner 逃生口。"""
-    cfg = ("poll_interval: 300\nkeywords: []\nexclude_chat_ids:\n  - oc_bot\n"
-           "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
-           "notify:\n  user_id: ou\n  bot_chat_id: oc_bot\n"
-           "lark_cli_appid: cli\n")
-    p = tmp_path / "config.yaml"
-    p.write_text(cfg, encoding="utf-8")
-    assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, path=p) == 1
-    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == ["oc_bot"]
+    """CLI 路径不能把 bot 会话移出 exclude_chats；--force 保留 owner 逃生口。"""
+    p = _write_cfg(tmp_path)
+    assert config_cli.config_set("exclude_chats", "oc_bot", remove=True, path=p) == 1
+    assert config_cli.config_mod.load_config(str(p))["exclude_chats"] == [{"chat_id": "oc_bot", "name": ""}]
     # --force 放行
-    assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, force=True, path=p) == 0
-    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == []
+    assert config_cli.config_set("exclude_chats", "oc_bot", remove=True, force=True, path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["exclude_chats"] == []
+
+
+def test_config_set_exclude_chats_add(tmp_path):
+    p = _write_cfg(tmp_path)
+    rc = config_cli.config_set("exclude_chats", "oc_new", add=True, path=p)
+    assert rc == 0
+    cfg = config_cli.config_mod.load_config(str(p))
+    assert {"chat_id": "oc_new", "name": ""} in cfg["exclude_chats"]
+
+
+def test_config_set_exclude_chats_remove_bot_guarded(tmp_path):
+    p = _write_cfg(tmp_path)
+    rc = config_cli.config_set("exclude_chats", "oc_bot", remove=True, path=p)
+    assert rc == 1   # 防自反馈守卫
+
+
+def test_config_set_exclude_chats_remove_bot_forced(tmp_path):
+    p = _write_cfg(tmp_path)
+    rc = config_cli.config_set("exclude_chats", "oc_bot", remove=True, force=True, path=p)
+    assert rc == 0
+
+
+def test_config_set_special_focus_enabled(tmp_path):
+    p = _write_cfg(tmp_path)
+    rc = config_cli.config_set("special_focus.enabled", "true", path=p)
+    assert rc == 0
+    cfg = config_cli.config_mod.load_config(str(p))
+    assert cfg["special_focus"]["enabled"] is True
+
+
+def test_config_set_special_focus_chats_rejected(tmp_path):
+    p = _write_cfg(tmp_path)
+    rc = config_cli.config_set("special_focus.chats", "oc_x", add=True, path=p)
+    assert rc == 1

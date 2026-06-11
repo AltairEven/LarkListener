@@ -195,3 +195,10 @@ def test_intent_ollama_uses_intent_timeout():
     with patch.object(_ur, "urlopen", fake_urlopen):
         intent.parse("你好", _CONFIG)
     assert captured["timeout"] == intent.INTENT_TIMEOUT
+
+
+def test_intent_prompt_mentions_new_fields():
+    from lark_listener.intent import INTENT_PROMPT
+    assert "exclude_chats" in INTENT_PROMPT
+    assert "special_focus.enabled" in INTENT_PROMPT
+    assert "exclude_chat_ids" not in INTENT_PROMPT

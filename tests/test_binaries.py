@@ -1,8 +1,8 @@
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from lark_listener import binaries
-from lark_listener.binaries import lark_cli, resolve_executable, set_lark_profile
+from lark_listener.binaries import lark_cli, resolve_executable, set_lark_profile, get_chat_name
 
 
 def teardown_function():
@@ -63,6 +63,35 @@ def test_lark_cli_first_element_is_resolved_binary():
 # --- 简洁性重构：event 订阅子进程 pkill 模式唯一事实源 ---
 
 from lark_listener.binaries import event_subscriber_pkill_pattern
+
+
+# --- get_chat_name ---
+
+
+@patch("lark_listener.binaries.subprocess.run")
+def test_get_chat_name_user_identity_first(mock_run):
+    mock = MagicMock(); mock.returncode = 0; mock.stdout = '"技术群"\n'
+    mock_run.return_value = mock
+    assert get_chat_name("oc_x") == "技术群"
+    assert mock_run.call_count == 1
+    args = mock_run.call_args_list[0][0][0]
+    assert "--as" in args and args[args.index("--as") + 1] == "user"
+
+
+@patch("lark_listener.binaries.subprocess.run")
+def test_get_chat_name_falls_back_to_bot(mock_run):
+    fail = MagicMock(); fail.returncode = 1; fail.stdout = ""
+    ok = MagicMock(); ok.returncode = 0; ok.stdout = '"Bot群"\n'
+    mock_run.side_effect = [fail, ok]
+    assert get_chat_name("oc_x") == "Bot群"
+    args = mock_run.call_args_list[1][0][0]
+    assert args[args.index("--as") + 1] == "bot"
+
+
+@patch("lark_listener.binaries.subprocess.run")
+def test_get_chat_name_failure_returns_empty(mock_run):
+    mock_run.side_effect = OSError("no cli")
+    assert get_chat_name("oc_x") == ""
 
 
 def test_event_subscriber_pkill_pattern():

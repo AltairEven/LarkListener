@@ -16,11 +16,12 @@
 | `providers.py` | **AI provider 注册表（唯一事实源）**：每后端一个对象（`complete`/`deep_probe`/`sdk_import`/`pip_packages`）+ `extract_json`；SDK 在方法体内**延迟 import**；新增 AI 后端主要改这个文件（analyzer._call_ai 分发、doctor provider 白名单、setup 菜单仍需各加一行） |
 | `analyzer.py` / `intent.py` | 调 AI：prompt 构造与结果归一在本层，三后端调用委托 `providers.complete`（`_call_claude/_call_openai/_call_ollama` 与 `_call_ai` 保留原名原签名供单测直测） |
 | `common.py` | 跨模块常量/路径唯一事实源：`TZ`（+08:00）、`listener_home()`（惰性读 `LARK_LISTENER_HOME`；service 例外地 import 时冻结一次） |
-| `fetcher.py` | 调 `lark-cli` 搜消息、取上下文 |
-| `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`/`event_subscriber_pkill_pattern`（event 订阅 pkill 模式唯一事实源，按 profile 隔离防误杀 dev/prod 对方与其它 agent 的订阅进程；被 main/service/fetcher/notifier/setup 依赖） |
-| `notifier.py` | 统一封套唯一事实源 `build_summary_response`/`error_response`；卡片 `build_summary_card`（飞书 table 卡片，2026-06-10 真发逐版定稿：仅两列——会话列 38% 宽、纯名称无🔴、冒号后直接接带链接原文片段（`_short_snippet` 缩到 20 字内，命中关键词时以关键词为中心截取）+ 摘要列仅 AI 摘要；分类 emoji+数量入表头、row_height auto；表头背景实测仅支持 none/grey）→ 失败回退 `build_summary_text`（Markdown，保留🔴 既有样式）；`Notifier.notify(…, resp=None)` 可直接消费调用方已建封套；macOS 通知（osascript 默认，terminal-notifier 可选） |
-| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify`/`lark_cli_appid` 受保护不可经 bot 改）；`load_config` 钳制：`poll_interval`/`context_messages` 非负 int（负→0/非法→默认）、`keywords`/`exclude_chat_ids` 强制 list[str]（坏值绝不让消费点 TypeError 崩进 KeepAlive 重启循环）；`dump_roundtrip` 0600 原子写（保持原 mode）；`removes_bot_chat` 防自反馈守卫（bot 与 CLI 路径共用） |
-| `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend`（浅检零副作用、兼校验 appid 在 profile 列表但**不验授权时效**；`--deep` 经 `probe_messages_search`（与 setup 共用）真探 search:message + AI 真连；`SEARCH_SCOPE` 唯一事实源；日志只读尾部 64KB）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
+| `chats.py` | 未免打扰探测与会话分类唯一事实源：`classify_chat`/`ChatRegistry`（每轮 refresh、失败沿用上轮、首刷失败全按勿扰；`special_chat_ids`/`name_of` 供抓取与补名） |
+| `fetcher.py` | 调 `lark-cli` 搜消息、取上下文；@all 按分类分流（勿扰群仅关键词命中才收、普通群全收）；特别关注群全量合并抓取（每群上限 `special_focus.max_messages`）；上下文合并抓取（去重、单次调用） |
+| `binaries.py` | lark-cli 路径/调用封装：`lark_cli`/`resolve_executable`/`ensure_path`/`set_lark_profile`/`get_chat_name`（取群名唯一事实源，user→bot 双身份重试；fetcher 群名补全与 ChatRegistry 配置补名共用）/`event_subscriber_pkill_pattern`（event 订阅 pkill 模式唯一事实源，按 profile 隔离防误杀 dev/prod 对方与其它 agent 的订阅进程；被 main/service/fetcher/notifier/setup 依赖） |
+| `notifier.py` | 统一封套唯一事实源 `build_summary_response`/`error_response`；卡片 `build_summary_card`（飞书 table 卡片，2026-06-10 真发逐版定稿：仅两列——会话列 38% 宽、纯名称无🔴、冒号后直接接带链接原文片段（`_short_snippet` 缩到 20 字内，命中关键词时以关键词为中心截取）+ 摘要列仅 AI 摘要；分类 emoji+数量入表头、row_height auto；表头背景实测仅支持 none/grey；**特别关注区 🟪**，顺序统一 p2p→at_me→at_all→special→keyword；分组键 `(category,chat_id)` 去重）→ 失败回退 `build_summary_text`（Markdown，保留🔴 既有样式）；`Notifier.notify(…, resp=None)` 可直接消费调用方已建封套；macOS 通知（osascript 默认，terminal-notifier 可选） |
+| `config.py` / `config_editor.py` | 读/改 config.yaml（ruamel 保留注释；`ai`/`notify`/`lark_cli_appid` 受保护不可经 bot 改）；`load_config` 钳制：`poll_interval`/`context_messages` 非负 int（负→0/非法→默认）、`keywords` 强制 list[str]、`exclude_chats` 强制 list[dict]、`special_focus` 子树钳制（`enabled` bool、`max_messages` 正 int、`chats` list[dict]；坏值绝不让消费点 TypeError 崩进 KeepAlive 重启循环）；旧键 `include_at_all`/`exclude_chat_ids` 迁移兼容（读时静默升级）；`dump_roundtrip` 0600 原子写（保持原 mode）；`removes_bot_chat` 防自反馈守卫（bot 与 CLI 路径共用） |
+| `doctor.py` | `lark-listener doctor` 主动自检：`check_config/service/lark_cli/last_poll/recent_errors/ai_backend/special_focus`（浅检零副作用、兼校验 appid 在 profile 列表但**不验授权时效**；`--deep` 经 `probe_messages_search`（与 setup 共用）真探 search:message + AI 真连，`check_special_focus` 真探 `chat-list --exclude-muted` 并提示已免打扰的绑定群（关注词不生效）；`SEARCH_SCOPE` 唯一事实源；日志只读尾部 64KB）；`run_doctor`/`cmd_doctor`（退出 0 全过/1 有 fail，每项带 `fix`） |
 | `config_cli.py` | `config get/set` 非交互：点号路径、列表增/减/整体替换、`--force` 放行受保护键、写后 `_validate` 失败回滚、api_key 脱敏；只复用 `config_editor` 底层（不复用其 bot 调度） |
 | `agent_adapters.py` | 可插拔 adapter 注册表 + `ClaudeCodeAdapter`（装/卸 `~/.claude/skills/lark-listener` 操作 skill，包内资源经 importlib.resources 读）；`install/uninstall_agent_skills`（best-effort） |
 | `state.py` | 去重与上次轮询时间（坏文件任意形状不崩、原子写；默认路径经 `listener_home()` 尊重 `LARK_LISTENER_HOME`） |
@@ -65,7 +66,7 @@ python3 -m pytest -q       # 全绿才算改完
 
 6. **best-effort 不可抛**：`notifier` 通知失败、`_reply_bot`、AI/网络调用失败都不能让轮询循环崩溃（launchd KeepAlive 会陷入重启循环）。
 
-7. **守护循环符号被测试依赖**：`poll_once`/`_handle_message`/`_reply_bot`/`_add_reaction`/`_pending_change` 保持原位、原签名。`poll_once` 已把 fetch/analyze 拆到 `_fetch_window`/`_analyze_window`（与 `cmd_summarize` 共用）——改动时保持其行为与这两个 helper 的签名（单测直接依赖，且 poll_once 测试 `@patch("lark_listener.main.Fetcher/Analyzer/Notifier")` 要求它们留在 main.py）。
+7. **守护循环符号被测试依赖**：`poll_once`/`_handle_message`/`_reply_bot`/`_add_reaction`/`_pending_change` 保持原位、原签名。`poll_once` 已把 fetch/analyze 拆到 `_fetch_window`/`_analyze_window`（与 `cmd_summarize` 共用）——改动时保持其行为与这两个 helper 的签名（单测直接依赖，且 poll_once 测试 `@patch("lark_listener.main.Fetcher/Analyzer/Notifier")` 要求它们留在 main.py）。`ChatRegistry`/`_chat_registry` 同理被 test_main 的 autouse fixture monkeypatch（防 poll_once 测试真发 chat-list）——改名/挪出 main.py 会让该防线静默失效。
 
 8. **每次隔离真跑后清理**：`./dev-test.sh clean` 或手动删 `/tmp/ll-*` 与对应 dev plist + `launchctl unload`。
 

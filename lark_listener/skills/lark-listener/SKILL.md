@@ -39,17 +39,33 @@ lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上
 - `lark-listener config get [KEY] [--json]` — 查看配置（api_key 已脱敏）
 - `lark-listener config set KEY VALUE [--add|--remove] [--force]` — 改配置，无需重启：
   轮询开启时下次轮询生效；`poll_interval=0`（自动轮询已关闭）时最迟约 10 分钟被服务感知
-  - 点号路径：`poll_interval`、`keywords`、`ai.model`、`notify.user_id`、`lark_cli_appid` 等
+  - 点号路径：`poll_interval`、`keywords`、`ai.model`、`notify.user_id`、`lark_cli_appid`、`special_focus.enabled`、`special_focus.max_messages` 等
   - `poll_interval` 为非负整数秒，**0 = 关闭自动轮询**（服务保持在线，仅 bot 按需汇总/改配置）
   - 列表：整体 `config set keywords a,b`；增 `--add`；减 `--remove`
+  - `exclude_chats` 的 `--add`/`--remove` 值为裸 chat_id（如 `oc_xxx`），name 由服务自动补全
+  - `special_focus.chats`（含每群专属关注关键词）**不可经 CLI/bot 修改**，需直接编辑 `~/.lark_listener/config.yaml`；`special_focus.enabled`/`special_focus.max_messages` 可经点号路径修改
   - 受保护项（`ai`/`notify`/`lark_cli_appid`）需 `--force`
-  - **例外：从 `exclude_chat_ids` 移除 Bot 自身会话也会被拒**，确需移除加 `--force`（防汇总自反馈）
+  - **例外：从 `exclude_chats` 移除 Bot 自身会话也会被拒**，确需移除加 `--force`（防汇总自反馈）
   - **例外：改 `lark_cli_appid` 后需 `lark-listener restart` 才生效**（bot 监听子进程按启动时的 profile 订阅）
 - `lark-listener agent-skills install|uninstall`
 
 ## 🚫 不要无人值守运行（交互输入 / 弹 GUI；EOF/Ctrl-C 会干净取消并退出码 1）
 - `lark-listener setup`（交互向导）、`lark-listener uninstall`（二次确认）、
   `lark-listener config`（无参=开 GUI 编辑器）——交给用户在自己终端跑。
+
+## 会话分类（`summarize` 返回的 `category` 枚举）
+
+`data.conversations[].category` 取值及含义（卡片显示顺序与此一致）：
+
+| category | 含义 |
+|---|---|
+| `p2p` | 私聊 |
+| `at_me` | 群内 @我 |
+| `at_all` | @所有人（未免打扰的非特别关注群全收；勿扰群仅命中关键词才收） |
+| `special` | 特别关注群（`special_focus.enabled=true` 且群未免打扰；全量汇总） |
+| `keyword` | 关键词命中（勿扰群/普通群均适用） |
+
+勿扰群 = 飞书「免打扰」开启的群；特别关注群 = `special_focus.enabled=true` 时所有未免打扰的群（与是否在 `special_focus.chats` 中无关）；普通群 = 未免打扰的群（仅 `special_focus.enabled=false` 时存在）。`special_focus.chats` 只为单个群叠加专属关注关键词（仅影响 AI 分析侧重），不改变分类。
 
 ## 常见修复
 - 浅检 doctor 全绿但收不到汇总（授权过期浅检验不出）→ `lark-listener doctor --deep`（真探 search:message + AI 后端）

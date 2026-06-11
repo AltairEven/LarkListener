@@ -215,6 +215,57 @@ def _deep_probe(provider, model, api_key, base_url):
         return False, str(e)
 
 
+def _probe_unmuted_chats(appid: str, run=None):
+    """chat-list --exclude-muted 单页真探：返回未免打扰群 id 集合，失败 None。
+    doctor 只需判定可用性与绑定群状态，单页 100 足够；分页全量是运行时
+    ChatRegistry 的职责。"""
+    import json as _json
+    import subprocess
+    from lark_listener.binaries import resolve_executable
+    run = run or subprocess.run
+    cmd = [resolve_executable("lark-cli"), "im", "+chat-list", "--exclude-muted",
+           "--page-size", "100", "--format", "json"]
+    if appid:
+        cmd += ["--profile", appid]
+    try:
+        r = run(cmd, capture_output=True, text=True, timeout=30)
+        data = _json.loads(r.stdout)
+        if r.returncode != 0 or not data.get("ok"):
+            return None
+        return {c.get("chat_id") for c in (data.get("data") or {}).get("chats") or []
+                if isinstance(c, dict) and c.get("chat_id")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def check_special_focus(config: dict, deep: bool = False, run=None) -> Check:
+    """special_focus 配置体检。浅检只看形状（load_config 已钳制，重点是
+    提示语义）；--deep 真探未免打扰列表并核对绑定群状态——绑定了关注词的
+    群若已免打扰，关注词静默失效，这是用户最易踩的暗坑。"""
+    sf = config.get("special_focus") or {}
+    if not sf.get("enabled"):
+        return Check("special_focus", "ok", "特别关注未启用")
+    bound = sf.get("chats") or []
+    if not deep:
+        return Check("special_focus", "ok",
+                     f"特别关注已启用（绑定 {len(bound)} 个群；--deep 可验证免打扰状态）")
+    unmuted = _probe_unmuted_chats(config.get("lark_cli_appid", ""), run=run)
+    if unmuted is None:
+        return Check("special_focus", "fail",
+                     "chat-list --exclude-muted 探测失败（特别关注将降级为全勿扰）",
+                     fix="lark-cli auth login --profile "
+                         f"{config.get('lark_cli_appid', '')} 重新授权后重试")
+    muted_bound = [c for c in bound
+                   if isinstance(c, dict) and c.get("chat_id") not in unmuted]
+    if muted_bound:
+        names = "、".join((c.get("name") or c.get("chat_id", "")) for c in muted_bound)
+        return Check("special_focus", "warn",
+                     f"绑定的群当前处于免打扰，关注关键词不会生效：{names}",
+                     fix="在飞书取消这些群的消息免打扰，或从 special_focus.chats 移除")
+    return Check("special_focus", "ok",
+                 f"特别关注已启用，{len(unmuted)} 个未免打扰群")
+
+
 def run_doctor(deep: bool = False):
     """跑全部检查，返回 (checks, exit_code)。exit_code: 有 fail=1 否则 0。"""
     status = service.collect_status()
@@ -234,6 +285,8 @@ def run_doctor(deep: bool = False):
         check_recent_errors(log_path),
         check_ai_backend(config if isinstance(config, dict) else {}, deep=deep),
     ]
+    if config:
+        checks.append(check_special_focus(config, deep=deep))
     code = 1 if any(c.status == "fail" for c in checks) else 0
     return checks, code
 

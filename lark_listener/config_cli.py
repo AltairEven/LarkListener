@@ -11,7 +11,7 @@ from lark_listener import config as config_mod
 from lark_listener.common import listener_home
 from lark_listener.config_editor import (
     PROTECTED, load_roundtrip, dump_roundtrip, _coerce_scalar, _apply_list_op,
-    removes_bot_chat,
+    _apply_chat_list_op, removes_bot_chat,
 )
 
 MASK = "***"
@@ -97,17 +97,34 @@ def config_set(key: str, value: str, add: bool = False, remove: bool = False,
     old = current
     # 手编 `keywords:`（值留空 = null）很常见：已知列表字段（DEFAULTS 中为
     # list）按空列表处理，否则 --add 被误拒、普通 set 会把列表字段写成字符串。
-    if current is None and isinstance(config_mod.DEFAULTS.get(leaf), list):
-        current = []
+    # 同时支持嵌套默认（如 special_focus 子字段）。
+    if current is None:
+        default_leaf = config_mod.DEFAULTS.get(leaf)
+        if default_leaf is None and len(parts) == 2:
+            default_leaf = (config_mod.DEFAULTS.get(parts[0]) or {}).get(leaf)
+        if isinstance(default_leaf, list):
+            current = []
+
+    # special_focus.chats 含每群关键词，结构复杂，不支持 CLI 增删——必须直接编辑文件。
+    if leaf == "chats" and "special_focus" in parts:
+        print("❌ special_focus.chats 结构含每群关键词，请直接编辑 config.yaml")
+        return 1
 
     if add or remove:
         if not isinstance(current, list):
             print(f"❌ {key} 不是列表，--add/--remove 不适用")
             return 1
-        new_value, err = _apply_list_op(current, "add" if add else "remove", value)
+        op = "add" if add else "remove"
+        if leaf == "exclude_chats":
+            new_value, err = _apply_chat_list_op(current, op, value)
+        else:
+            new_value, err = _apply_list_op(current, op, value)
     elif isinstance(current, list):
         items = [v.strip() for v in value.split(",") if v.strip()]
-        new_value, err = _apply_list_op(current, "set", items)
+        if leaf == "exclude_chats":
+            new_value, err = _apply_chat_list_op(current, "set", items)
+        else:
+            new_value, err = _apply_list_op(current, "set", items)
     else:
         new_value, err = _coerce_scalar(leaf, value, current)
     if err:
@@ -116,13 +133,13 @@ def config_set(key: str, value: str, add: bool = False, remove: bool = False,
 
     # 防自反馈守卫（判断与 bot 路径共用 removes_bot_chat）。CLI 是 owner 的
     # deliberate 操作，--force 保留逃生口。
-    if leaf == "exclude_chat_ids" and not force:
+    if leaf == "exclude_chats" and not force:
         try:
             bot_chat = (data.get("notify") or {}).get("bot_chat_id")
         except Exception:  # noqa: BLE001
             bot_chat = ""
         if removes_bot_chat(bot_chat, current, new_value):
-            print("❌ exclude_chat_ids 中的 bot 会话不可移除（防汇总自反馈循环）；"
+            print("❌ exclude_chats 中的 bot 会话不可移除（防汇总自反馈循环）；"
                   "确需移除请加 --force")
             return 1
 

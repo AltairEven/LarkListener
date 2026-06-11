@@ -75,7 +75,7 @@ def _to_bool(value):
 def _coerce_scalar(field, value, current):
     """Coerce an AI-provided value to the field's type. Returns (value, error)."""
     # bool must be checked before int (bool is a subclass of int)
-    if isinstance(current, bool) or field == "include_at_all":
+    if isinstance(current, bool):
         b = _to_bool(value)
         if b is None:
             return None, f"{field} 需要 true/false"
@@ -119,14 +119,74 @@ def _apply_list_op(current, op, value):
     return None, f"未知操作 {op}"
 
 
+def _chat_id_set(value) -> set:
+    ids = set()
+    for item in value or []:
+        if isinstance(item, dict) and item.get("chat_id"):
+            ids.add(str(item["chat_id"]))
+        elif isinstance(item, str):
+            ids.add(item)
+    return ids
+
+
 def removes_bot_chat(bot_chat_id, current, new_value) -> bool:
-    """exclude_chat_ids 的变更是否会把 bot 会话移出——防自反馈守卫的共享判断
+    """exclude_chats 的变更是否会把 bot 会话移出——防自反馈守卫的共享判断
     （bot 指令路径 _plan_changes 与 CLI 路径 config_cli.config_set 共用）。
-    移出后汇总卡片命中关键词会被下一轮轮询再捞起、再汇总，循环放大。"""
+    兼容新（{chat_id,name} 条目）旧（纯 str）两种形态。"""
     bot = str(bot_chat_id or "")
-    return bool(bot
-                and bot in [str(x) for x in (current or [])]
-                and bot not in [str(x) for x in (new_value or [])])
+    return bool(bot and bot in _chat_id_set(current)
+                and bot not in _chat_id_set(new_value))
+
+
+def _apply_chat_list_op(current, op, value):
+    """exclude_chats 专用：条目为 {chat_id, name}；add/remove 的 value 是
+    chat_id 字符串（name 留空由轮询自动补全）。Returns (new_list, error)。"""
+    if value is None:
+        return None, "列表操作需要提供值"
+    items = []
+    for x in current or []:
+        if isinstance(x, dict) and x.get("chat_id"):
+            items.append({"chat_id": str(x["chat_id"]), "name": str(x.get("name") or "")})
+        elif isinstance(x, str):
+            items.append({"chat_id": x, "name": ""})
+
+    def _cid(v):
+        return str(v.get("chat_id", "")) if isinstance(v, dict) else str(v)
+
+    if op == "set":
+        new = value if isinstance(value, list) else [value]
+        out, seen = [], set()
+        for x in new:
+            cid = _cid(x)
+            if cid and cid not in seen:
+                seen.add(cid)
+                name = str(x.get("name") or "") if isinstance(x, dict) else ""
+                out.append({"chat_id": cid, "name": name})
+        return out, None
+    if op == "add":
+        cid = _cid(value)
+        if not cid:
+            return None, "exclude_chats 条目需要 chat_id"
+        if cid not in {i["chat_id"] for i in items}:
+            items.append({"chat_id": cid, "name": ""})
+        return items, None
+    if op == "remove":
+        cid = _cid(value)
+        return [i for i in items if i["chat_id"] != cid], None
+    return None, f"未知操作 {op}"
+
+
+def _resolve_field(effective_config, field):
+    """返回 (current, ok)。支持一层点号嵌套标量（special_focus.enabled 等）。"""
+    if "." in field:
+        root, leaf = field.split(".", 1)
+        parent = effective_config.get(root)
+        if isinstance(parent, dict) and leaf in parent:
+            return parent[leaf], True
+        return None, False
+    if field in effective_config:
+        return effective_config[field], True
+    return None, False
 
 
 def _plan_changes(changes, effective_config):
@@ -137,12 +197,22 @@ def _plan_changes(changes, effective_config):
         field = ch.get("field")
         op = ch.get("op", "set")
         value = ch.get("value")
-        if field in PROTECTED:
-            return None, f"{field} 配置受保护，无法通过 bot 修改"
-        if field is None or field not in effective_config:
+        root = (field or "").split(".", 1)[0]
+        if root in PROTECTED:
+            return None, f"{root} 配置受保护，无法通过 bot 修改"
+        if field is None:
+            return None, "未知配置项：None"
+        current, ok = _resolve_field(effective_config, field)
+        if not ok:
             return None, f"未知配置项：{field}"
-        current = effective_config.get(field)
-        if isinstance(current, list):
+        if field == "exclude_chats":
+            new_value, err = _apply_chat_list_op(current, op, value)
+        elif isinstance(current, dict):
+            return None, (f"{field} 为嵌套配置，请指定具体字段"
+                          f"（如 special_focus.enabled / special_focus.max_messages）")
+        elif isinstance(current, list):
+            if field.endswith(".chats") or field == "special_focus.chats":
+                return None, "special_focus.chats 结构含每群关键词，请直接编辑 config.yaml"
             new_value, err = _apply_list_op(current, op, value)
         else:
             if op != "set":
@@ -151,8 +221,8 @@ def _plan_changes(changes, effective_config):
         if err:
             return None, err
         bot_chat_id = (effective_config.get("notify") or {}).get("bot_chat_id")
-        if field == "exclude_chat_ids" and removes_bot_chat(bot_chat_id, current, new_value):
-            return None, "exclude_chat_ids 中的 bot 会话不可移除（防止汇总消息被自身轮询命中形成自反馈）"
+        if field == "exclude_chats" and removes_bot_chat(bot_chat_id, current, new_value):
+            return None, "exclude_chats 中的 bot 会话不可移除（防止汇总消息被自身轮询命中形成自反馈）"
         if new_value == current:
             continue  # no-op: value unchanged, nothing to do
         resolved.append((field, new_value, f"{field}: {current!r} → {new_value!r}"))
@@ -174,7 +244,15 @@ def apply_changes(path, changes, effective_config) -> ApplyResult:
     # 空文件 load_roundtrip 返回 None；按空映射处理，不能 TypeError。
     data = load_roundtrip(path) or CommentedMap()
     for field, new_value, _ in resolved:
-        data[field] = new_value
+        if "." in field:
+            root, leaf = field.split(".", 1)
+            parent = data.get(root)
+            if not isinstance(parent, dict):
+                parent = CommentedMap()
+                data[root] = parent
+            parent[leaf] = new_value
+        else:
+            data[field] = new_value
     dump_roundtrip(path, data)
     return ApplyResult(True, diff="\n".join(line for _, _, line in resolved))
 
@@ -203,3 +281,47 @@ def render_help() -> str:
         "  • 汇总消息：「汇总今天的消息」\n"
         "修改会先让你确认，回复「确认」后生效，下次轮询自动应用。"
     )
+
+
+def autofill_chat_names(path: str | Path, name_of) -> bool:
+    """为 exclude_chats / special_focus.chats 中缺 name 的条目补名，并把
+    旧键迁移为新格式（exclude_chat_ids → exclude_chats、删除废键
+    include_at_all）。有变化才原子回写（保注释、保 mode）。
+
+    name_of: chat_id -> str，查不到返回空串（留空下轮再试）。
+    返回是否发生了回写。调用方（poll_once）必须 best-effort 包裹。"""
+    data = load_roundtrip(path)
+    if not isinstance(data, dict):
+        return False
+    changed = False
+    if "exclude_chat_ids" in data and "exclude_chats" not in data:
+        entries = []
+        for x in (data.get("exclude_chat_ids") or []):
+            if isinstance(x, dict) and x.get("chat_id"):
+                entries.append({"chat_id": str(x["chat_id"]),
+                                "name": str(x.get("name") or "")})
+            elif x is not None:
+                entries.append({"chat_id": str(x), "name": ""})
+        data["exclude_chats"] = entries
+        del data["exclude_chat_ids"]
+        changed = True
+    if "include_at_all" in data:
+        del data["include_at_all"]
+        changed = True
+
+    def _fill(entries):
+        nonlocal changed
+        for e in entries or []:
+            if isinstance(e, dict) and e.get("chat_id") and not e.get("name"):
+                name = name_of(str(e["chat_id"])) or ""
+                if name:
+                    e["name"] = name
+                    changed = True
+
+    _fill(data.get("exclude_chats"))
+    sf = data.get("special_focus")
+    if isinstance(sf, dict):
+        _fill(sf.get("chats"))
+    if changed:
+        dump_roundtrip(path, data)
+    return changed

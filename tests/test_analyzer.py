@@ -682,3 +682,57 @@ def test_call_ollama_uses_declared_timeout():
         a = Analyzer(provider="ollama", model="m", api_key="", base_url="", keywords=[])
         a._call_ollama("p")
     assert captured["timeout"] == analyzer_mod.AI_TIMEOUT
+
+
+# --- Task 6: special_chats 标注测试 ---
+
+
+def _capture_prompt(analyzer, categorized, **kwargs):
+    captured = {}
+    def fake_call(prompt):
+        captured["prompt"] = prompt
+        return []
+    analyzer._call_ai = fake_call
+    analyzer.analyze(categorized, **kwargs)
+    return captured["prompt"]
+
+
+def test_analyze_marks_special_chat_with_bound_keywords():
+    analyzer = Analyzer(provider="claude", model="m", api_key="k",
+                        base_url="", keywords=["SDK"])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.SPECIAL] = [{
+        "message_id": "m1", "chat_id": "oc_vip",
+        "sender": {"id": "ou_a", "name": "甲"},
+        "msg_type": "text", "content": "聊扩容", "create_time": "1716796800",
+    }]
+    prompt = _capture_prompt(analyzer, categorized,
+                             special_chats={"oc_vip": ["扩容"]})
+    assert "--- conversation_id: oc_vip [特别关注]（本群关注关键词：扩容） ---" in prompt
+    assert "标注为 [特别关注] 的会话" in prompt
+
+
+def test_analyze_marks_special_chat_without_bound_keywords():
+    analyzer = Analyzer(provider="claude", model="m", api_key="k",
+                        base_url="", keywords=["SDK"])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.SPECIAL] = [{
+        "message_id": "m1", "chat_id": "oc_vip",
+        "sender": {"id": "ou_a", "name": "甲"},
+        "msg_type": "text", "content": "随便聊", "create_time": "1716796800",
+    }]
+    prompt = _capture_prompt(analyzer, categorized, special_chats={"oc_vip": []})
+    assert "--- conversation_id: oc_vip [特别关注] ---" in prompt
+
+
+def test_analyze_no_special_marks_when_not_passed():
+    analyzer = Analyzer(provider="claude", model="m", api_key="k",
+                        base_url="", keywords=["SDK"])
+    categorized = {cat: [] for cat in MessageCategory}
+    categorized[MessageCategory.P2P] = [{
+        "message_id": "m1", "chat_id": "oc_p",
+        "sender": {"id": "ou_a", "name": "甲"},
+        "msg_type": "text", "content": "hi", "create_time": "1716796800",
+    }]
+    prompt = _capture_prompt(analyzer, categorized)
+    assert "[特别关注]" not in prompt.split("会话列表：")[1]

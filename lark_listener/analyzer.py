@@ -24,6 +24,7 @@ USER_PROMPT_TEMPLATE = """\
 用户关注的关键词：{keywords}
 
 以下是按会话分组的消息。标记为 [我] 的是用户自己发的消息，标记为 [上下文] 的是前后相关消息，两者仅作为理解上下文使用。
+标注为 [特别关注] 的会话是用户重点关注的群：其 summary 除常规概括外，还须围绕用户关注的关键词（及该会话标注的本群关注关键词，如有）展开分析，relevance 按合并后的关键词集合评估。
 请对每个会话（conversation_id）进行整体分析，输出：
 1. conversation_id: 会话 ID
 2. relevance: 该会话与关键词的语义相关度（high/medium/low）
@@ -130,6 +131,7 @@ class Analyzer:
         categorized: dict[MessageCategory, list[dict[str, Any]]],
         my_user_id: str = "",
         context: Optional[dict[str, list[dict[str, Any]]]] = None,
+        special_chats: Optional[dict[str, list[str]]] = None,
     ) -> dict[str, ConversationAnalysis]:
         """Analyze messages grouped by conversation (chat_id)."""
         # Group all messages by chat_id
@@ -155,7 +157,13 @@ class Analyzer:
                         all_msgs.append(ctx_msg)
             # Sort by create_time
             msgs_sorted = sorted(all_msgs, key=lambda m: m.get("create_time", ""))
-            lines = [f"--- conversation_id: {chat_id} ---"]
+            tag = ""
+            if special_chats and chat_id in special_chats:
+                bound = special_chats[chat_id]
+                tag = " [特别关注]"
+                if bound:
+                    tag += f"（本群关注关键词：{'、'.join(bound)}）"
+            lines = [f"--- conversation_id: {chat_id}{tag} ---"]
             for msg in msgs_sorted:
                 sender = msg.get("sender", {}).get("name", "未知")
                 sender_id = msg.get("sender", {}).get("id", "")
