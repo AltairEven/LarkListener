@@ -1,4 +1,5 @@
 # LarkListener 配置模板 —— 列出全部配置项。
+# 本文件含明文 api_key：工具会以 0600 权限创建并在每次写回时保持。
 # 有默认值的项已填默认值；无默认值的项留空，需自行填写。
 
 # 【必填，无默认值】承载本服务的 lark-cli bot 的 appId（见 `lark-cli profile list`）。
@@ -14,6 +15,7 @@ poll_interval: 300
 include_at_all: true
 
 # AI 分析时为每个会话额外拉取的上下文消息数（0 表示不拉取）。默认 20。
+# 负数按 0 处理，非法值（字符串等）回退 20。
 context_messages: 20
 
 # 关注的关键词（命中即汇总）。默认空列表。示例：
@@ -22,7 +24,9 @@ context_messages: 20
 #     - 故障
 keywords: []
 
-# 屏蔽的聊天 chat_id（这些聊天的消息不会被汇总）。默认空列表。示例：
+# 屏蔽的聊天 chat_id（这些聊天的消息不会被汇总）。默认空列表。
+# Bot 自身会话由 setup 自动加入；不可经 Bot 指令移除，`config set --remove`
+# 需加 --force（防止汇总消息被自身轮询命中形成自反馈）。示例：
 #   exclude_chat_ids:
 #     - oc_xxxxxxxxxxxx    # LarkListener Bot
 exclude_chat_ids: []
@@ -35,7 +39,7 @@ ai:
   model:
   # API Key（claude / openai 必填；ollama 本地模型留空即可）。无默认值。
   api_key:
-  # 自定义 / 兼容端点的 base_url（openai 兼容或 ollama 用）。默认空字符串。
+  # 自定义 / 兼容端点的 base_url（openai 兼容 / ollama / claude 兼容网关均适用）。默认空字符串。
   base_url: ""
 
 # 推送目标

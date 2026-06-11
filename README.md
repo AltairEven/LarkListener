@@ -84,7 +84,9 @@ lark-listener start
 
 全部配置项及说明见 [config.example.yaml](config.example.yaml)（关键词、屏蔽会话、AI 分析上下文条数、是否汇总 @所有人 等）。
 
-> **不想被定时打扰？** 把轮询间隔设为 **0** 即可关闭自动轮询：服务保持在线，Bot 照常响应「汇总」「改配置」，只是不再定时推送。随时把间隔改回正数即恢复（经 Bot 改立即生效；用 `lark-listener config set` 改最迟约 10 分钟生效）。
+> Bot 只听你本人（配置里 `notify.user_id`）的指令：其他人私聊它会被静默忽略，不会触发汇总或消耗 AI 调用。
+
+> **不想被定时打扰？** 把轮询间隔设为 **0** 即可关闭自动轮询：服务保持在线，Bot 照常响应「汇总」「改配置」，只是不再定时推送。随时把间隔改回正数即恢复（无论经 Bot 还是 `lark-listener config set` 改，最迟约 10 分钟内被服务感知）。
 
 ## 四、命令参考
 
@@ -107,6 +109,7 @@ lark-listener config get ai.model
 lark-listener config set poll_interval 600          # 点号路径直接改
 lark-listener config set keywords --add 上线        # 列表项增 / 减用 --add / --remove
 lark-listener config set ai.model xxx --force       # 受保护键（ai/notify/lark_cli_appid）需 --force
+# 例外：从 exclude_chat_ids 移除 Bot 自身会话也需 --force（防汇总自反馈）
 ```
 
 其他：
@@ -131,7 +134,7 @@ lark-listener restart
 
 ## 六、出问题了？
 
-想一次性自检，可跑 `lark-listener doctor`——它会逐项检查配置、`lark-cli` 授权、服务状态、上次轮询时效、AI 后端，并对有问题的项给出修复建议。
+想一次性自检，可跑 `lark-listener doctor`——它会逐项检查配置、`lark-cli`、服务状态、上次轮询时效、AI 后端，并对有问题的项给出修复建议。注意浅检验不出授权过期：**怀疑授权问题或「收不到汇总」时跑 `lark-listener doctor --deep`**，它会真实探测 `search:message` 授权与 AI 后端连通。
 
 或先看日志，多数问题都能在里面找到线索：
 
@@ -141,7 +144,7 @@ tail -f ~/.lark_listener/logs/stderr.log
 
 几种常见情况：
 
-- **拉不到消息**：多半是 `lark-cli` 授权过期，重新跑 `lark-cli auth login --scope search:message`。
+- **拉不到消息**：多半是 `lark-cli` 授权过期，重新跑 `lark-cli auth login --profile <你的 appid> --scope search:message`（appid 见 `lark-listener config get lark_cli_appid`）。
 - **Bot 不回消息**：用 `lark-listener status` 看服务在不在跑，不在就 `lark-listener start`。
 - **桌面没弹通知**：通知只是次要提醒，汇总仍会通过 Bot 私聊送达，可以忽略。想要更好的体验可以 `brew install terminal-notifier`——装了它之后点击通知能直接跳转到飞书会话。
 

@@ -43,15 +43,17 @@ lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上
   - `poll_interval` 为非负整数秒，**0 = 关闭自动轮询**（服务保持在线，仅 bot 按需汇总/改配置）
   - 列表：整体 `config set keywords a,b`；增 `--add`；减 `--remove`
   - 受保护项（`ai`/`notify`/`lark_cli_appid`）需 `--force`
+  - **例外：从 `exclude_chat_ids` 移除 Bot 自身会话也会被拒**，确需移除加 `--force`（防汇总自反馈）
   - **例外：改 `lark_cli_appid` 后需 `lark-listener restart` 才生效**（bot 监听子进程按启动时的 profile 订阅）
 - `lark-listener agent-skills install|uninstall`
 
-## 🚫 不要无人值守运行（会卡 stdin / 弹 GUI）
+## 🚫 不要无人值守运行（交互输入 / 弹 GUI；EOF/Ctrl-C 会干净取消并退出码 1）
 - `lark-listener setup`（交互向导）、`lark-listener uninstall`（二次确认）、
   `lark-listener config`（无参=开 GUI 编辑器）——交给用户在自己终端跑。
 
 ## 常见修复
-- 拉不到消息 → lark-cli 授权过期：`lark-cli auth login --scope search:message`
+- 浅检 doctor 全绿但收不到汇总（授权过期浅检验不出）→ `lark-listener doctor --deep`（真探 search:message + AI 后端）
+- 拉不到消息 → lark-cli 授权过期：`lark-cli auth login --profile <配置的 appid> --scope search:message`（appid 见 `lark-listener config get lark_cli_appid`）
 - bot 不回 → `lark-listener status`，没跑就 `lark-listener start`
 - 升级后行为没变 → 必须 `lark-listener restart`
 - 日志：`tail -n 100 ~/.lark_listener/logs/stderr.log`
