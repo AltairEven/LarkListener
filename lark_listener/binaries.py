@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +77,28 @@ def event_subscriber_pkill_pattern(profile: str) -> str:
     结尾锚定（cli_abc 不得匹配 cli_abc123；appid 经 re.escape 防元字符）。
     """
     return f"lark-cli event.*subscribe.*--as bot.*--profile {re.escape(profile)}( |$)"
+
+
+def get_chat_name(chat_id: str) -> str:
+    """经 `im chats get` 查群名：先 user 后 bot 身份重试（bot 才在的群 user
+    身份查不到）。失败/查不到返回空串——调用方一律按「无名」处理。
+    fetcher 群名补全与 ChatRegistry 配置补名共用的唯一实现。"""
+    for identity in ("user", "bot"):
+        try:
+            proc = subprocess.run(
+                lark_cli("im", "chats", "get",
+                         "--params", json.dumps({"chat_id": chat_id}),
+                         "--as", identity,
+                         "--jq", ".data.name"),
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0:
+                name = proc.stdout.strip().strip('"')
+                if name and name != "null":
+                    return name
+        except Exception:  # noqa: BLE001 — best-effort：查不到就是无名
+            continue
+    return ""
 
 
 # 只缓存「成功解析」的绝对路径，进程内复用。失败不缓存：服务启动早于安装/升级完成

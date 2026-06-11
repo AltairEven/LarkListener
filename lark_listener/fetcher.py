@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from lark_listener.binaries import lark_cli
+from lark_listener.binaries import lark_cli, get_chat_name as _binaries_get_chat_name
 from lark_listener.chats import ChatClass
 
 logger = logging.getLogger("lark_listener")
@@ -249,23 +249,8 @@ class Fetcher:
         return None
 
     def _get_chat_name(self, chat_id: str) -> Optional[str]:
-        """Get chat name via lark-cli, trying user then bot identity."""
-        for identity in ("user", "bot"):
-            try:
-                proc = subprocess.run(
-                    lark_cli("im", "chats", "get",
-                             "--params", json.dumps({"chat_id": chat_id}),
-                             "--as", identity,
-                             "--jq", ".data.name"),
-                    capture_output=True, text=True, timeout=10,
-                )
-                if proc.returncode == 0:
-                    name = proc.stdout.strip().strip('"')
-                    if name and name != "null":
-                        return name
-            except Exception:
-                continue
-        return None
+        """Get chat name via lark-cli, delegating to binaries.get_chat_name."""
+        return _binaries_get_chat_name(chat_id) or None
 
     def _search(
         self,

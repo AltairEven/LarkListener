@@ -285,11 +285,8 @@ def run_doctor(deep: bool = False):
         check_recent_errors(log_path),
         check_ai_backend(config if isinstance(config, dict) else {}, deep=deep),
     ]
-    try:
-        _cfg = config_mod.load_config()
-        checks.append(check_special_focus(_cfg, deep=deep))
-    except Exception:  # noqa: BLE001 — config 坏时 check_config 已报，无需重复
-        pass
+    if config:
+        checks.append(check_special_focus(config, deep=deep))
     code = 1 if any(c.status == "fail" for c in checks) else 0
     return checks, code
 

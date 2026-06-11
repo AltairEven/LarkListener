@@ -6,7 +6,7 @@ import subprocess
 from enum import Enum
 from typing import Optional
 
-from lark_listener.binaries import lark_cli
+from lark_listener.binaries import lark_cli, get_chat_name as _binaries_get_chat_name
 
 logger = logging.getLogger("lark_listener")
 
@@ -97,14 +97,4 @@ class ChatRegistry:
         """群名解析（供配置补名）：优先未免打扰列表，勿扰群回落单群查询。"""
         if self._unmuted and chat_id in self._unmuted:
             return self._unmuted[chat_id]
-        try:
-            proc = subprocess.run(
-                lark_cli("im", "chats", "get", "--params",
-                         json.dumps({"chat_id": chat_id}), "--format", "json"),
-                capture_output=True, text=True, timeout=30)
-            data = json.loads(proc.stdout)
-            if proc.returncode == 0 and data.get("ok"):
-                return str((data.get("data") or {}).get("name") or "")
-        except Exception:  # noqa: BLE001 — 补名失败留空下轮再试
-            pass
-        return ""
+        return _binaries_get_chat_name(chat_id)

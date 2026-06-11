@@ -610,7 +610,7 @@ def test_multiple_keywords(mock_run):
 # --- Fill chat names tests ---
 
 
-@patch("lark_listener.fetcher.subprocess.run")
+@patch("lark_listener.binaries.subprocess.run")
 def test_fill_chat_names(mock_run):
     """Messages with empty chat_name should get names filled via lookup."""
     msg_no_name = [{

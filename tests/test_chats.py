@@ -94,18 +94,18 @@ def test_special_chat_ids_empty_when_disabled():
     assert reg.classify("oc_vip", "group") is ChatClass.NORMAL
 
 
-@patch("lark_listener.chats.subprocess.run")
+@patch("lark_listener.binaries.subprocess.run")
 def test_name_of_falls_back_to_chats_get(mock_run):
-    """勿扰群不在未免打扰列表里，补名走单群查询。"""
+    """勿扰群不在未免打扰列表里，补名走单群查询（经 binaries.get_chat_name）。"""
     mock = MagicMock(); mock.returncode = 0
-    mock.stdout = json.dumps({"ok": True, "data": {"name": "某勿扰群"}})
+    mock.stdout = '"某勿扰群"\n'
     mock_run.return_value = mock
     reg = ChatRegistry()
     reg._unmuted = {}
     assert reg.name_of("oc_muted") == "某勿扰群"
 
 
-@patch("lark_listener.chats.subprocess.run")
+@patch("lark_listener.binaries.subprocess.run")
 def test_name_of_failure_returns_empty(mock_run):
     mock_run.side_effect = OSError("no cli")
     reg = ChatRegistry()
