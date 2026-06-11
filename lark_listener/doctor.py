@@ -2,17 +2,40 @@ from __future__ import annotations
 
 import importlib.util
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from lark_listener import config as config_mod
 from lark_listener import service
 
-TZ = timezone(timedelta(hours=8))
+from lark_listener.common import TZ
 
-# claude→anthropic, openai→openai, ollama→无需 SDK
-_SDK_FOR = {"claude": "anthropic", "openai": "openai"}
+# 服务必需的 lark-cli 用户授权 scope（doctor 修复指引与 setup 引导共用）。
+SEARCH_SCOPE = "search:message"
+
+
+def probe_messages_search(appid: str, run=None) -> bool:
+    """窄区间 messages-search 真探 search:message 授权是否可用。
+
+    doctor --deep 与 setup 末段共用的唯一实现。token 过期/缺 scope 时
+    profile list 照样成功，只有真打一次搜索才能发现。判定走 json 解析——
+    字符串匹配（`'"ok": true' in out`）依赖 lark-cli 的缩进格式，
+    输出转 compact 即全员误报缺权限。"""
+    import json as _json
+    import subprocess
+    from lark_listener.binaries import resolve_executable
+    run = run or subprocess.run
+    try:
+        probe = run([resolve_executable("lark-cli"), "im", "+messages-search",
+                     "--chat-type", "p2p",
+                     "--start", "2020-01-01T00:00:00+08:00",
+                     "--end", "2020-01-01T00:01:00+08:00",
+                     "--format", "json", "--profile", appid],
+                    capture_output=True, text=True, timeout=30)
+        return bool(_json.loads(probe.stdout).get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @dataclass
@@ -45,7 +68,14 @@ def check_service(status: dict) -> Check:
     return Check("service", "fail", "服务未安装", fix="lark-listener setup")
 
 
-def check_lark_cli(run=None) -> Check:
+def check_lark_cli(run=None, appid: str = "", deep: bool = False) -> Check:
+    """lark-cli 可用性检查。
+
+    浅检：profile list 可执行 + 配置的 appid 在 profile 列表中（服务被钉在该
+    profile，仅看 active profile 会查错对象）。注意 profile list 是本地操作，
+    token 过期时照样成功——授权时效只有 --deep 的窄区间 messages-search 真探
+    才能发现（这恰是「收不到汇总」最常见的根因）。"""
+    import json as _json
     import subprocess
     from lark_listener.binaries import resolve_executable
     run = run or subprocess.run
@@ -54,15 +84,40 @@ def check_lark_cli(run=None) -> Check:
     if exe == "lark-cli":
         return Check("lark_cli", "fail", "未找到 lark-cli",
                      fix="npm install -g @larksuite/cli")
+    login_fix = (f"lark-cli auth login --profile {appid} --scope {SEARCH_SCOPE}"
+                 if appid else f"lark-cli auth login --scope {SEARCH_SCOPE}")
     try:
         r = run([exe, "profile", "list"], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
-            return Check("lark_cli", "warn", "lark-cli 可能未登录或授权过期",
-                         fix="lark-cli auth login --scope search:message")
-        return Check("lark_cli", "ok", "lark-cli 可用")
+            return Check("lark_cli", "warn", "lark-cli 执行异常（profile list 失败）",
+                         fix="lark-cli config init；仍失败则重装：npm install -g @larksuite/cli")
+        if appid:
+            try:
+                profiles = _json.loads(r.stdout)
+                # 形态非预期时一律不据此判（原则：解析不出 ≠ appid 不存在）：
+                # dict 包裹 / list 元素非 dict（推不出任何 appId）都视为不可判定；
+                # 仅当 profiles 是空列表（真没有任何 profile）时按缺失处理。
+                ids = None
+                if isinstance(profiles, list):
+                    ids = {p.get("appId") for p in profiles if isinstance(p, dict)}
+                    if profiles and not ids:
+                        ids = None
+            except Exception:  # noqa: BLE001
+                ids = None  # 输出不可解析时不据此误判
+            if ids is not None and appid not in ids:
+                return Check("lark_cli", "fail",
+                             f"配置的 lark_cli_appid={appid} 不在 lark-cli profile 列表中",
+                             fix=login_fix)
+        if deep and appid:
+            if not probe_messages_search(appid, run=run):
+                return Check("lark_cli", "fail",
+                             "search:message 探测失败（授权过期或缺 scope）", fix=login_fix)
+            return Check("lark_cli", "ok", "lark-cli 可用，search:message 已验证")
+        if deep and not appid:
+            return Check("lark_cli", "ok", "lark-cli 可用（配置缺 appid，已跳过授权真探）")
+        return Check("lark_cli", "ok", "lark-cli 可用（浅检不验授权时效，--deep 真探）")
     except Exception as e:  # noqa: BLE001
-        return Check("lark_cli", "warn", f"lark-cli 调用失败：{e}",
-                     fix="lark-cli auth login --scope search:message")
+        return Check("lark_cli", "warn", f"lark-cli 调用失败：{e}", fix=login_fix)
 
 
 def check_last_poll(status: dict, poll_interval: int, now: Optional[datetime] = None) -> Check:
@@ -91,7 +146,12 @@ def check_recent_errors(log_path: Path) -> Check:
     try:
         if not log_path.exists():
             return Check("recent_errors", "ok", "无日志（尚未运行或已清理）")
-        tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+        # 只读尾部 64KB：日志无轮转，长跑数月可达数百 MB，read_text 全量
+        # 载入既慢又吃内存；窗口外的陈年 traceback 也不应永久 warn。
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode("utf-8", errors="replace").splitlines()[-200:]
         for i, line in enumerate(tail):
             if "Traceback (most recent call last)" in line:
                 snippet = " / ".join(tail[i:i + 3])
@@ -118,7 +178,8 @@ def check_ai_backend(config: dict, deep: bool = False) -> Check:
     if provider in ("claude", "openai") and not api_key:
         return Check("ai_backend", "fail", f"{provider} 缺 api_key",
                      fix="config set ai.api_key <key> --force")
-    sdk = _SDK_FOR.get(provider)
+    from lark_listener.providers import sdk_import_for
+    sdk = sdk_import_for(provider)
     if sdk and not _sdk_installed(sdk):
         return Check("ai_backend", "fail", f"venv 内缺 {sdk} SDK",
                      fix=f"~/.lark_listener/venv/bin/pip install {sdk}")
@@ -141,26 +202,15 @@ def check_ai_backend(config: dict, deep: bool = False) -> Check:
 
 
 def _deep_probe(provider, model, api_key, base_url):
-    """真实最小请求探测，返回 (ok, detail)。best-effort，异常即视为失败。"""
+    """真实最小请求探测，返回 (ok, detail)。best-effort，异常即视为失败。
+    分发与各后端实现统一在 providers.py（探活语义独立于 complete）。"""
+    from lark_listener import providers
     try:
-        if provider == "claude":
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key, timeout=30)
-            client.messages.create(model=model, max_tokens=1,
-                                    messages=[{"role": "user", "content": "ping"}])
-            return True, ""
-        if provider == "openai":
-            import openai
-            client = openai.OpenAI(api_key=api_key, base_url=base_url or None, timeout=30)
-            client.models.list()
-            return True, ""
-        if provider == "ollama":
-            import urllib.request
-            url = (base_url or "http://localhost:11434").rstrip("/") + "/api/tags"
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                resp.read()
-            return True, ""
+        p = providers.get(provider)
+    except ValueError:
         return False, f"未知 provider {provider}"
+    try:
+        return p.deep_probe(model=model, api_key=api_key, base_url=base_url)
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
@@ -175,10 +225,11 @@ def run_doctor(deep: bool = False):
     poll_interval = config.get("poll_interval", 300) if isinstance(config, dict) else 300
     log_path = service.LISTENER_HOME / "logs" / "stderr.log"
 
+    appid = config.get("lark_cli_appid", "") if isinstance(config, dict) else ""
     checks = [
         check_config(),
         check_service(status),
-        check_lark_cli(),
+        check_lark_cli(appid=appid or "", deep=deep),
         check_last_poll(status, poll_interval),
         check_recent_errors(log_path),
         check_ai_backend(config if isinstance(config, dict) else {}, deep=deep),

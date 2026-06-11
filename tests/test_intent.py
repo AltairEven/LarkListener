@@ -157,3 +157,41 @@ def test_prompt_excludes_protected_blocks(mock_call):
     assert "ou_secret" not in prompt
     assert "oc_secret" not in prompt
     assert "poll_interval" in prompt and "上线" in prompt
+
+
+# --- 二轮 review：claude base_url / ollama 超时 ---
+
+import json
+
+
+def test_intent_claude_passes_base_url():
+    fake = MagicMock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text='{"type":"none"}')]
+    cfg = {"ai": {"provider": "claude", "model": "m", "api_key": "k",
+                  "base_url": "https://proxy.example"}}
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        intent.parse("你好", {**_CONFIG, **cfg})
+    assert fake.Anthropic.call_args.kwargs["base_url"] == "https://proxy.example"
+
+
+def test_intent_ollama_uses_intent_timeout():
+    """ollama 分支超时应与 INTENT_TIMEOUT 一致：本地小模型吃满 config JSON
+    的 prompt 时 30s 很容易超，导致意图识别频繁「没太听懂」。"""
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps({"message": {"content": '{"type":"none"}'}}).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["timeout"] = timeout
+        return _Resp()
+
+    import urllib.request as _ur
+    with patch.object(_ur, "urlopen", fake_urlopen):
+        intent.parse("你好", _CONFIG)
+    assert captured["timeout"] == intent.INTENT_TIMEOUT

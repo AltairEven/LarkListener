@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 MAX_PROCESSED_IDS = 1000
-TZ = timezone(timedelta(hours=8))
+from lark_listener.common import TZ, listener_home
 
 logger = logging.getLogger("lark_listener")
 
@@ -16,7 +16,9 @@ logger = logging.getLogger("lark_listener")
 class State:
     def __init__(self, path: Optional[str] = None):
         if path is None:
-            path = str(Path.home() / ".lark_listener" / "state.json")
+            # 经 common.listener_home() 推导：尊重 LARK_LISTENER_HOME（dev 隔离），
+            # 此前硬编码 ~/.lark_listener 会让裸 State() 写穿生产。
+            path = str(listener_home() / "state.json")
         self._path = Path(path)
         self.last_poll_time: Optional[datetime] = None
         self.processed_message_ids: set[str] = set()
@@ -29,6 +31,8 @@ class State:
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f"state.json 顶层应为对象，实际 {type(data).__name__}")
             if data.get("last_poll_time"):
                 dt = datetime.fromisoformat(data["last_poll_time"])
                 # 归一到 +08:00：旧版/手写的 naive 串若与 aware 的 now 相减/比较会
@@ -37,8 +41,11 @@ class State:
             ids = data.get("processed_message_ids", [])
             self._ordered_ids = list(ids)
             self.processed_message_ids = set(ids)
-        except (json.JSONDecodeError, ValueError, OSError) as e:
+        except Exception as e:  # noqa: BLE001
             # Corrupt or unreadable state must not crash startup — start fresh.
+            # 宽捕获是有意的：State 每轮 poll 都会构造，任何形状的坏文件（顶层非
+            # 对象 → AttributeError、last_poll_time 为数字 → TypeError）若逃逸，
+            # 每一轮都会失败、窗口永不推进，比丢状态严重得多。
             logger.warning("State file unreadable (%s), starting fresh: %s", self._path, e)
             self.last_poll_time = None
             self._ordered_ids = []
@@ -57,8 +64,11 @@ class State:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self._path)
-        # Sync in-memory set with capped list
+        # Sync in-memory set AND list with the capped view: leaving _ordered_ids
+        # untruncated grows without bound, and an id evicted from the set would
+        # be appended a second time on its next add_processed_ids.
         self.processed_message_ids = set(capped)
+        self._ordered_ids = list(capped)
 
     def add_processed_ids(self, ids: list[str]):
         for msg_id in ids:

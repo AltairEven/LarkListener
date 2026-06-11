@@ -792,3 +792,37 @@ def test_keyword_category_p2p_chat_uses_partner_name():
     c = resp["data"]["conversations"][0]
     assert c["category"] == "keyword"
     assert c["title"] == "李四"
+
+
+def test_unknown_chat_renders_without_link():
+    """chat_id 缺失（归并为 unknown 组）时不渲染跳转链接——
+    `openChatId=unknown` 是可点击死链，纯文本片段更诚实。"""
+    messages = {
+        MessageCategory.P2P: [],
+        MessageCategory.AT_ME: [_make_msg("m1", None, "ou_other", "某人", "@你 看下")],
+        MessageCategory.KEYWORD: [],
+        MessageCategory.AT_ALL: [],
+    }
+    resp = build_summary_response(messages, {}, "15:00", "15:30", MY_USER_ID)
+    row = resp["data"]["conversations"][0]
+    assert row["link"] == ""
+
+    card = build_summary_card(resp)
+    conv_cell = card["body"]["elements"][0]["rows"][0]["conv"]
+    assert "](" not in conv_cell          # 无 markdown 链接
+    assert "@你 看下" in conv_cell         # 片段仍以纯文本呈现
+
+    text = build_summary_text(resp)
+    assert "[查看原文](" not in text
+
+
+def test_short_snippet_strips_envelope_ellipsis():
+    """封套 snippet（80 字 + "..."）二次截断时先剥掉尾部省略号再开窗：
+    窗口腰斩原 "..." 会产生「正文.....」残渣。"""
+    from lark_listener.notifier import _short_snippet
+    base = "甲" * 70 + "部署" + "乙" * 8          # 80 字
+    snippet = base + "..."                        # 封套截断形态
+    out = _short_snippet(snippet, "部署")
+    assert "部署" in out
+    assert "...." not in out                      # 无省略号残渣
+    assert out.endswith("...")                    # 截断信息仍由本函数表达

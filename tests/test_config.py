@@ -157,3 +157,66 @@ def test_load_config_clamps_poll_interval(tmp_path, raw, expected):
     config = load_config(str(config_file))
     assert config["poll_interval"] == expected
     assert isinstance(config["poll_interval"], int)
+
+
+# --- 二轮 review：load_config 钳制扩展到 context_messages / 列表字段 ---
+
+BAD_TYPES_CONFIG = """\
+poll_interval: 120
+lark_cli_appid: cli_test
+context_messages: null
+keywords: 上线
+exclude_chat_ids: null
+ai:
+  provider: claude
+  model: m
+  api_key: k
+notify:
+  user_id: ou_x
+  bot_chat_id: oc_y
+"""
+
+
+def test_load_config_clamps_context_messages(tmp_path):
+    """context_messages 坏值（null/字符串）回退默认 20，绝不让 main 的
+    `context_limit > 0` 比较 TypeError 崩掉每一轮 poll。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(BAD_TYPES_CONFIG)
+    cfg = load_config(str(p))
+    assert cfg["context_messages"] == 20
+
+    p.write_text(BAD_TYPES_CONFIG.replace("context_messages: null", "context_messages: abc"))
+    assert load_config(str(p))["context_messages"] == 20
+
+
+def test_load_config_coerces_scalar_keywords_to_list(tmp_path):
+    """keywords 写成标量（`keywords: 上线`）应整体视为单个关键词，
+    绝不被 fetcher 逐字符迭代成「上」「线」两次搜索。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(BAD_TYPES_CONFIG)
+    cfg = load_config(str(p))
+    assert cfg["keywords"] == ["上线"]
+
+
+def test_load_config_coerces_null_list_fields(tmp_path):
+    """`exclude_chat_ids:`（null）→ []，绝不让 `set(None)` TypeError。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(BAD_TYPES_CONFIG)
+    cfg = load_config(str(p))
+    assert cfg["exclude_chat_ids"] == []
+
+
+def test_load_config_list_items_coerced_str_and_none_dropped(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(BAD_TYPES_CONFIG.replace(
+        "keywords: 上线", "keywords:\n  - 部署\n  - null\n  - 123"))
+    cfg = load_config(str(p))
+    assert cfg["keywords"] == ["部署", "123"]
+
+
+def test_load_config_negative_context_messages_clamps_to_zero(tmp_path):
+    """负数按 0（关闭上下文拉取）处理，与 poll_interval 的负数语义一致，
+    而不是回退默认 20（用户写 -1 的意图显然是关掉）。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(BAD_TYPES_CONFIG.replace("context_messages: null", "context_messages: -1"))
+    assert load_config(str(p))["context_messages"] == 0

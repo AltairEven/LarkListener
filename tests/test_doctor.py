@@ -150,3 +150,104 @@ def test_check_last_poll_non_string_does_not_crash():
     # 损坏的 state.json：last_poll_time 是数字而非字符串 → 不应抛 TypeError
     c = doctor.check_last_poll({"last_poll_time": 12345}, 300)
     assert c.status == "warn"
+
+
+# --- 二轮 review：lark-cli 授权检查与日志 tail 读取 ---
+
+
+def test_check_lark_cli_appid_missing_from_profiles(monkeypatch):
+    """配置的 appid 不在 lark-cli profile 列表 → fail（服务钉在该 profile 上，
+    profile list 成功不代表该 bot 可用）。"""
+    import lark_listener.binaries as binaries
+    monkeypatch.setattr(binaries, "resolve_executable", lambda name: "/usr/local/bin/lark-cli")
+
+    class _R:
+        returncode = 0
+        stdout = '[{"appId": "cli_other", "active": true}]'
+    c = doctor.check_lark_cli(run=lambda *a, **k: _R(), appid="cli_mine")
+    assert c.status == "fail"
+    assert "cli_mine" in c.detail
+    assert "--profile cli_mine" in c.fix
+
+
+def test_check_lark_cli_deep_probe_detects_expired_auth(monkeypatch):
+    """--deep 用窄区间 messages-search 真探授权：token 过期/缺 scope 时
+    profile list 照样成功，浅检会漏报「收不到汇总」的最常见根因。"""
+    import lark_listener.binaries as binaries
+    monkeypatch.setattr(binaries, "resolve_executable", lambda name: "/usr/local/bin/lark-cli")
+
+    def fake_run(argv, **kw):
+        class _R:
+            returncode = 0
+        if "profile" in argv:
+            _R.stdout = '[{"appId": "cli_mine", "active": true}]'
+        else:
+            assert "--profile" in argv and "cli_mine" in argv
+            _R.stdout = '{"ok": false, "error": "token expired"}'
+        return _R()
+
+    c = doctor.check_lark_cli(run=fake_run, appid="cli_mine", deep=True)
+    assert c.status == "fail"
+    assert "auth login" in c.fix
+
+
+def test_check_lark_cli_deep_probe_ok(monkeypatch):
+    import lark_listener.binaries as binaries
+    monkeypatch.setattr(binaries, "resolve_executable", lambda name: "/usr/local/bin/lark-cli")
+
+    def fake_run(argv, **kw):
+        class _R:
+            returncode = 0
+            stdout = ('[{"appId": "cli_mine"}]' if "profile" in argv
+                      else '{"ok":true,"data":{"messages":[]}}')
+        return _R()
+
+    c = doctor.check_lark_cli(run=fake_run, appid="cli_mine", deep=True)
+    assert c.status == "ok"
+
+
+def test_check_recent_errors_reads_only_tail(tmp_path):
+    """只读文件尾部（日志无轮转、可长到数百 MB）：64KB 窗口之前的历史
+    traceback 不应再被报告。"""
+    log = tmp_path / "stderr.log"
+    old_tb = "Traceback (most recent call last):\n  old boom\n"
+    filler = ("normal line\n" * 8000)  # ≈ 96KB，把旧 traceback 挤出窗口
+    log.write_text(old_tb + filler)
+    assert doctor.check_recent_errors(log).status == "ok"
+
+
+def test_deep_probe_claude_passes_base_url(monkeypatch):
+    """--deep 的 claude 探测同样要消费 base_url，否则代理网关用户
+    探测打到官方端点必失败，doctor 反而误导排查。"""
+    import sys
+    from unittest.mock import MagicMock, patch
+    fake = MagicMock()
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        doctor._deep_probe("claude", "m", "k", "https://proxy.example")
+    assert fake.Anthropic.call_args.kwargs["base_url"] == "https://proxy.example"
+
+
+def test_check_lark_cli_nonlist_profiles_not_misjudged(monkeypatch):
+    """profile list 输出可解析但形态非 list（dict 包裹）→ 不得据此误报
+    「appid 不在列表」fail（与「输出不可解析时不误判」同一原则）。"""
+    import lark_listener.binaries as binaries
+    monkeypatch.setattr(binaries, "resolve_executable", lambda name: "/usr/local/bin/lark-cli")
+
+    class _R:
+        returncode = 0
+        stdout = '{"profiles": [{"appId": "cli_mine"}]}'
+    c = doctor.check_lark_cli(run=lambda *a, **k: _R(), appid="cli_mine")
+    assert c.status == "ok"
+
+
+def test_check_lark_cli_list_of_nondict_profiles_not_misjudged(monkeypatch):
+    """profiles 是 list 但元素非 dict（如字符串数组）→ 推不出任何 appId，
+    视为不可判定，不得误报「appid 不在列表」（与 dict 包裹同一原则）。"""
+    import lark_listener.binaries as binaries
+    monkeypatch.setattr(binaries, "resolve_executable", lambda name: "/usr/local/bin/lark-cli")
+
+    class _R:
+        returncode = 0
+        stdout = '["cli_mine", "cli_other"]'
+    c = doctor.check_lark_cli(run=lambda *a, **k: _R(), appid="cli_mine")
+    assert c.status == "ok"

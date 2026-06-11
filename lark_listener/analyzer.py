@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from lark_listener import providers
 from lark_listener.fetcher import MessageCategory
+# 实现已移至 providers.extract_json；别名保留（intent 曾跨模块引用私有名、
+# tests/test_analyzer 直接 import _extract_json）。
+from lark_listener.providers import extract_json as _extract_json
 
 logger = logging.getLogger("lark_listener")
 
@@ -63,26 +65,6 @@ def format_duration(seconds: int) -> str:
     if seconds < 60:
         return f"{seconds} 秒"
     return f"{math.ceil(seconds / 60)} 分钟"
-
-
-def _extract_json(text: str) -> Any:
-    """Parse JSON from an LLM response, tolerating markdown fences and prose.
-
-    Models often wrap output in ```json ... ``` or add explanatory text, which
-    breaks a bare json.loads. Strip common fences first, then fall back to the
-    first JSON array/object substring.
-    """
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
-        if m:
-            return json.loads(m.group(1))
-        raise
 
 
 def _parse_card(content: str) -> tuple[str, str]:
@@ -239,50 +221,21 @@ class Analyzer:
         else:
             raise ValueError(f"Unknown AI provider: {self.provider}")
 
+    # 三个 _call_* 保留原名原签名（单测直测它们），实现委托 providers——
+    # 新增后端只改 providers.py。max_tokens=8192：4096 在大批量会话时输出
+    # JSON 会被截断 → _extract_json 拼不出合法 JSON → 整批分析静默降级为 {}。
     def _call_claude(self, user_prompt: str) -> list[dict]:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=self.api_key)
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-            timeout=AI_TIMEOUT,
-        )
-        return _extract_json(response.content[0].text)
+        return _extract_json(providers.complete(
+            "claude", model=self.model, api_key=self.api_key, base_url=self.base_url,
+            user_prompt=user_prompt, system=SYSTEM_PROMPT,
+            max_tokens=8192, timeout=AI_TIMEOUT))
 
     def _call_openai(self, user_prompt: str) -> list[dict]:
-        import openai
-
-        client = openai.OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url or None,
-        )
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            timeout=AI_TIMEOUT,
-        )
-        return _extract_json(response.choices[0].message.content)
+        return _extract_json(providers.complete(
+            "openai", model=self.model, api_key=self.api_key, base_url=self.base_url,
+            user_prompt=user_prompt, system=SYSTEM_PROMPT, timeout=AI_TIMEOUT))
 
     def _call_ollama(self, user_prompt: str) -> list[dict]:
-        url = (self.base_url or "http://localhost:11434") + "/api/chat"
-        payload = json.dumps({
-            "model": self.model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-        }).encode()
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-        return _extract_json(data["message"]["content"])
+        return _extract_json(providers.complete(
+            "ollama", model=self.model, api_key=self.api_key, base_url=self.base_url,
+            user_prompt=user_prompt, system=SYSTEM_PROMPT, timeout=AI_TIMEOUT))

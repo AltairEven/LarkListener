@@ -80,3 +80,42 @@ def test_write_config_file_roundtrips(tmp_path):
     setup_wizard.write_config_file(str(path), cfg)
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert loaded == cfg
+
+
+# --- 二轮 review：权限/退出码/交互健壮性 ---
+
+import os as _os
+import stat as _stat
+
+
+def test_write_config_file_sets_0600(tmp_path):
+    p = tmp_path / "config.yaml"
+    setup_wizard.write_config_file(str(p), {"ai": {"api_key": "secret"}})
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_parse_poll_input():
+    """轮询间隔输入解析：非数字回退默认而非裸 ValueError 终止向导。"""
+    assert setup_wizard._parse_poll("") == 300
+    assert setup_wizard._parse_poll("600") == 600
+    assert setup_wizard._parse_poll("0") == 0
+    assert setup_wizard._parse_poll("-5") == 0
+    assert setup_wizard._parse_poll("五分钟") == 300
+
+
+def test_cmd_setup_returns_1_without_lark_cli(monkeypatch):
+    monkeypatch.setattr("lark_listener.binaries.resolve_executable",
+                        lambda n: "/nonexistent/lark-cli")
+    assert setup_wizard.cmd_setup() == 1
+
+
+def test_cmd_setup_eof_cancels(monkeypatch, tmp_path):
+    """stdin 关闭（管道/非交互）时不得裸 EOFError traceback。"""
+    monkeypatch.setattr("lark_listener.binaries.resolve_executable", lambda n: sys.executable)
+    monkeypatch.setattr(setup_wizard, "_detect_active_appid", lambda: ("", "", ""))
+    monkeypatch.setattr(setup_wizard.service, "LISTENER_HOME", tmp_path)
+
+    def _eof(_prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    assert setup_wizard.cmd_setup() == 1

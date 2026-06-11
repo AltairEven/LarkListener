@@ -58,3 +58,20 @@ def test_set_lark_profile_none_clears_pin():
 def test_lark_cli_first_element_is_resolved_binary():
     cmd = lark_cli("im", "x")
     assert cmd[0].endswith("lark-cli")
+
+
+# --- 简洁性重构：event 订阅子进程 pkill 模式唯一事实源 ---
+
+from lark_listener.binaries import event_subscriber_pkill_pattern
+
+
+def test_event_subscriber_pkill_pattern():
+    """三要素缺一不可：subscribe（不误杀 event consume）、--as bot、
+    --profile + 结尾锚定（cli_abc 不匹配 cli_abc123）；appid 经 re.escape。"""
+    import re
+    p = event_subscriber_pkill_pattern("cli_mine")
+    assert "subscribe" in p and "--as bot" in p
+    assert p.endswith("( |$)")
+    assert re.search(p, "node /x/lark-cli event +subscribe --as bot --force --profile cli_mine")
+    assert not re.search(p, "node /x/lark-cli event +subscribe --as bot --force --profile cli_mine123")
+    assert not re.search(p, "node /x/lark-cli event consume Key --as bot --profile cli_mine")

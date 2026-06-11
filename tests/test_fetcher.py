@@ -616,3 +616,37 @@ def test_fill_app_sender_names_sets_name_on_app_senders(mock_run):
     assert result[MessageCategory.P2P][0]["sender"]["name"] == "文档助手"
     assert result[MessageCategory.P2P][1]["sender"]["name"] == "张三"
     assert mock_run.call_count == 1  # 只为 app 发送者查询
+
+
+# --- 二轮 review：_search 对脏响应/脏消息的入口硬化 ---
+
+from unittest.mock import MagicMock as _MM
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_search_handles_null_data(mock_run):
+    """`{"ok": true, "data": null}` 不得 AttributeError——该异常会穿透到
+    run 循环计入连续出错，使整轮 poll 失败而非按既有策略返回 []。"""
+    mock_run.return_value = _MM(returncode=0, stdout='{"ok": true, "data": null}')
+    f = Fetcher(keywords=[])
+    start = datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ)
+    end = datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ)
+    assert f._search(start, end, chat_type="p2p") == []
+
+
+@patch("lark_listener.fetcher.subprocess.run")
+def test_search_filters_messages_without_id(mock_run):
+    """缺 message_id / 非 dict 的脏消息在入口过滤——下游 fetch/analyzer/
+    poll_once 多处裸取 message_id，且都发生在 state 推进之前（毒消息冻结窗口）。"""
+    payload = json.dumps({"ok": True, "data": {"messages": [
+        {"chat_id": "oc_1", "content": "no id"},
+        "not-a-dict",
+        {"message_id": "m_good", "chat_id": "oc_1", "content": "ok"},
+        {"message_id": None, "chat_id": "oc_1"},
+    ]}})
+    mock_run.return_value = _MM(returncode=0, stdout=payload)
+    f = Fetcher(keywords=[])
+    start = datetime(2026, 5, 27, 0, 0, 0, tzinfo=TZ)
+    end = datetime(2026, 5, 27, 12, 0, 0, tzinfo=TZ)
+    msgs = f._search(start, end, chat_type="p2p")
+    assert [m["message_id"] for m in msgs] == ["m_good"]

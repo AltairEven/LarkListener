@@ -61,6 +61,15 @@ _CATEGORY_ORDER = [
     (MessageCategory.AT_ALL, "@所有人"),
 ]
 
+# macOS 通知摘要的短名（顺序同 _CATEGORY_ORDER；通知空间有限，
+# 「私聊」比卡片分类名「私聊消息」更短）。
+_CATEGORY_SHORT = [
+    (MessageCategory.P2P, "私聊"),
+    (MessageCategory.AT_ME, "@我"),
+    (MessageCategory.KEYWORD, "关键词命中"),
+    (MessageCategory.AT_ALL, "@所有人"),
+]
+
 # 卡片表头用彩色方块区分分类（飞书 table 表头背景实测只支持 none/grey，
 # blue/green 等色值 API 收下但静默回退灰色，故用 emoji 实现颜色区分）。
 _CATEGORY_EMOJI = {
@@ -141,7 +150,8 @@ def _conversation_row(
         "label": label,
         "title": title,
         "chat_id": chat_id,
-        "link": _chat_link(chat_id),
+        # chat_id 缺失（归并为 unknown 组）时不给链接：openChatId=unknown 是死链。
+        "link": _chat_link(chat_id) if chat_id != "unknown" else "",
         "urgency": ar.urgency if ar else "normal",
         "relevance": ar.relevance if ar else "medium",
         "matched_keyword": group.get("matched_keyword", "") if cat == MessageCategory.KEYWORD else "",
@@ -224,7 +234,9 @@ def _envelope_sections(resp: Optional[dict[str, Any]]):
 
 
 def _render_conversation_md(c: dict[str, Any]) -> str:
-    header = f"{_title_md(c)}：“{c['snippet']}” [查看原文]({c['link']})"
+    header = f"{_title_md(c)}：“{c['snippet']}”"
+    if c["link"]:
+        header += f" [查看原文]({c['link']})"
     parts = [header]
     if c["summary"]:
         parts.append(f"*💡 {c['summary']}*")
@@ -254,17 +266,25 @@ def build_summary_text(resp: dict[str, Any]) -> str:
 def _short_snippet(snippet: str, keyword: str = "", limit: int = 20) -> str:
     """卡片用短原文：最多 limit 字。命中关键词时截取含关键词的窗口（关键词
     居中），否则取开头；被截掉的一侧补 ...。只影响卡片展示，封套
-    snippet（80 字上限）不变。"""
-    if len(snippet) <= limit:
-        return snippet
-    idx = snippet.find(keyword) if keyword else -1
+    snippet（80 字上限）不变。
+
+    已知局限：matched_keyword 匹配的是原始消息，关键词若已被封套的 80 字
+    截断截掉，这里 find 不到，回退取开头 limit 字；原文自身以 "..." 结尾
+    （未经封套截断）也会被当作截断标记剥掉——输出视觉等价，可接受。"""
+    # 封套截断会带尾部 "..."：先剥掉再开窗，否则窗口腰斩省略号会产生
+    # 「正文.....」残渣；截断信息由下方 head/tail 重新表达。
+    truncated = snippet.endswith("...")
+    base = snippet[:-3] if truncated else snippet
+    if len(base) <= limit:
+        return base + ("..." if truncated else "")
+    idx = base.find(keyword) if keyword else -1
     if idx < 0:
-        return snippet[:limit] + "..."
-    start = max(0, min(idx - (limit - len(keyword)) // 2, len(snippet) - limit))
+        return base[:limit] + "..."
+    start = max(0, min(idx - (limit - len(keyword)) // 2, len(base) - limit))
     end = start + limit
     head = "..." if start > 0 else ""
-    tail = "..." if end < len(snippet) else ""
-    return head + snippet[start:end] + tail
+    tail = "..." if (end < len(base) or truncated) else ""
+    return head + base[start:end] + tail
 
 
 def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -288,8 +308,12 @@ def build_summary_card(resp: dict[str, Any]) -> Optional[dict[str, Any]]:
         table_rows = []
         for c in rows_src:
             short = _short_snippet(c["snippet"], c.get("matched_keyword", ""))
-            orig = (f"[“{short}”]({c['link']})" if short
-                    else f"[查看]({c['link']})")
+            if not c["link"]:
+                orig = f"“{short}”" if short else "—"
+            elif short:
+                orig = f"[“{short}”]({c['link']})"
+            else:
+                orig = f"[查看]({c['link']})"
             table_rows.append({
                 "conv": f"{_title_md(c, icon=False)}：{orig}",
                 "summ": c["summary"] or "—",
@@ -343,7 +367,7 @@ class Notifier:
         # tenants may not render the table component; a readable message beats none.
         if not self._send_bot_card(card):
             self._send_bot_message(build_summary_text(resp))
-        self._send_macos_notification(categorized, my_user_id)
+        self._send_macos_notification(categorized)
 
     def _send_im(self, *payload: str) -> bool:
         """Shared bot-DM send pipeline. Returns True on success.
@@ -380,24 +404,15 @@ class Notifier:
     def _send_macos_notification(
         self,
         categorized: dict[MessageCategory, list[dict[str, Any]]],
-        my_user_id: str = "",
     ):
         # Count conversations, not messages
         groups = _group_by_chat(categorized)
-        p2p = sum(1 for g in groups.values() if g["category"] == MessageCategory.P2P)
-        at_me = sum(1 for g in groups.values() if g["category"] == MessageCategory.AT_ME)
-        kw = sum(1 for g in groups.values() if g["category"] == MessageCategory.KEYWORD)
-        at_all = sum(1 for g in groups.values() if g["category"] == MessageCategory.AT_ALL)
-
+        # 查表循环：新增消息类别时这里曾是最易漏的硬编码点。
         counts = []
-        if p2p:
-            counts.append(f"{p2p}个私聊")
-        if at_me:
-            counts.append(f"{at_me}个@我")
-        if kw:
-            counts.append(f"{kw}个关键词命中")
-        if at_all:
-            counts.append(f"{at_all}个@所有人")
+        for cat, short in _CATEGORY_SHORT:
+            n = sum(1 for g in groups.values() if g["category"] == cat)
+            if n:
+                counts.append(f"{n}个{short}")
         message = "、".join(counts)
 
         open_url = f"https://applink.feishu.cn/client/chat/open?openChatId={self.bot_chat_id}"

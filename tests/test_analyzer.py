@@ -625,3 +625,60 @@ def test_analyze_skips_non_dict_items(mock_call_ai):
     results = analyzer.analyze(_single_msg(), my_user_id="ou_me")
     assert "oc_a" in results
     assert results["oc_a"].summary == "ok"
+
+
+# --- 二轮 review：claude base_url / max_tokens / ollama 超时 ---
+
+
+def test_call_claude_passes_base_url():
+    """claude 路径必须消费 ai.base_url（anthropic 兼容代理/网关），
+    与 openai/ollama 路径对齐；为空则传 None 用官方默认。"""
+    fake = MagicMock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text="[]")]
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        a = Analyzer(provider="claude", model="m", api_key="k",
+                     base_url="https://proxy.example", keywords=[])
+        a._call_claude("p")
+    assert fake.Anthropic.call_args.kwargs["base_url"] == "https://proxy.example"
+
+    fake.reset_mock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text="[]")]
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        a = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+        a._call_claude("p")
+    assert fake.Anthropic.call_args.kwargs["base_url"] is None
+
+
+def test_call_claude_max_tokens_room_for_many_conversations():
+    """4096 在大批量会话时 JSON 截断 → _extract_json 拼不出合法 JSON →
+    整批分析静默丢失；至少 8192。"""
+    fake = MagicMock()
+    fake.Anthropic.return_value.messages.create.return_value.content = [MagicMock(text="[]")]
+    with patch.dict(sys.modules, {"anthropic": fake}):
+        a = Analyzer(provider="claude", model="m", api_key="k", base_url="", keywords=[])
+        a._call_claude("p")
+    assert fake.Anthropic.return_value.messages.create.call_args.kwargs["max_tokens"] >= 8192
+
+
+def test_call_ollama_uses_declared_timeout():
+    """ollama 超时应与模块声明的 AI_TIMEOUT 一致，不得另行硬编码。"""
+    from lark_listener import analyzer as analyzer_mod
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps({"message": {"content": "[]"}}).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["timeout"] = timeout
+        return _Resp()
+
+    import urllib.request as _ur
+    with patch.object(_ur, "urlopen", fake_urlopen):
+        a = Analyzer(provider="ollama", model="m", api_key="", base_url="", keywords=[])
+        a._call_ollama("p")
+    assert captured["timeout"] == analyzer_mod.AI_TIMEOUT

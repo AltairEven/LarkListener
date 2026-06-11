@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -17,11 +17,10 @@ from lark_listener.analyzer import Analyzer, estimate_ai_seconds, format_duratio
 from lark_listener.binaries import ensure_path, lark_cli, set_lark_profile
 from lark_listener import config_editor, intent
 from lark_listener.config import load_config
-from lark_listener.fetcher import Fetcher, MessageCategory
+from lark_listener.fetcher import Fetcher
 from lark_listener.notifier import Notifier, build_summary_response, error_response
+from lark_listener.common import TZ
 from lark_listener.state import State
-
-TZ = timezone(timedelta(hours=8))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,10 +100,20 @@ def _handle_signal(signum, frame):
 
 
 def _kill_stale_event_subscribers():
-    """Kill any leftover lark-cli event subscribe processes."""
+    """Kill leftover lark-cli event subscribe processes — 仅限本实例。
+
+    模式必须带 --profile <appid>（lark_cli() 会给每次调用追加该参数）：全局的
+    `lark-cli event.*--as bot` 会误杀 dev/prod 对方实例、以及本机其它无关的
+    lark-cli 订阅进程（lark-event 等 agent 场景真实存在）。profile 未知时宁可
+    不杀——孤儿会在下次带 profile 的启动时被清掉。
+    """
+    from lark_listener import binaries
+    profile = binaries.get_lark_profile()
+    if not profile:
+        return
     try:
         subprocess.run(
-            ["pkill", "-f", "lark-cli event.*subscribe.*--as bot"],
+            ["pkill", "-f", binaries.event_subscriber_pkill_pattern(profile)],
             capture_output=True, timeout=5,
         )
     except Exception:
@@ -126,9 +135,9 @@ def _bot_listener():
                     "--force",
                 ),
                 stdout=subprocess.PIPE,
-                # 不能 PIPE：循环只读 stdout，长驻子进程的 stderr 写满 64KB
-                # 管道缓冲后会阻塞，事件流静默冻结（bot 不再响应且无日志）。
-                stderr=subprocess.DEVNULL,
+                # stderr 不能 PIPE（循环只读 stdout，长驻子进程写满 64KB 管道
+                # 缓冲后会阻塞，事件流静默冻结）；继承父进程 stderr（默认 None）
+                # 则零管道零死锁，且订阅失败原因经 launchd 落进 stderr.log。
                 text=True,
             )
             _listener_proc = proc
@@ -280,22 +289,27 @@ def poll_once(
             end.strftime("%H:%M"),
             my_user_id=my_user_id,
         )
+        logger.info("Summary sent successfully")
     except Exception:  # noqa: BLE001 — 脏数据兜底
         # notify 内部发送已 best-effort，能抛到这里的是封套/卡片构建遇到脏数据
         # （如 chat_id 为 null）。绝不能阻断下方 state 推进：否则 last_poll_time
         # 冻结，同一条毒消息每轮重新拉取、每轮必炸，汇总永久中断且重启无法自愈。
+        # 该轮汇总因此被丢弃——必须给 owner 一条 best-effort 告警，不能零感知。
         logger.exception("Notify failed (dirty data?); advancing state anyway")
+        _reply_bot(my_user_id,
+                   "⚠️ 本轮汇总构建/推送失败，该时间窗已跳过，详见日志：\n"
+                   "tail -n 100 ~/.lark_listener/logs/stderr.log")
 
     # Update state only for regular polls (not custom time range)
     if not custom_start:
         all_ids = []
         for msgs in categorized.values():
-            all_ids.extend(m["message_id"] for m in msgs)
+            # .get 过滤：缺 message_id 的脏消息若硬下标，会恰在 notify 兜底
+            # 之后、state.save 之前抛 KeyError——毒消息循环换个位置复活。
+            all_ids.extend(m.get("message_id") for m in msgs if m.get("message_id"))
         state.add_processed_ids(all_ids)
         state.last_poll_time = now
         state.save()
-
-    logger.info("Summary sent successfully")
 
 
 def _emit_response(resp: dict) -> int:
@@ -387,9 +401,9 @@ def _handle_message(content: str, sender_id: str, config_path: str, state_path: 
         return
 
     if parsed.type == "error":
-        # AI parse failed (outage / bad JSON) — let the sender know it wasn't understood.
-        if sender_id:
-            _reply_bot(sender_id, "🤔 没太听懂，发「帮助」可查看用法。")
+        # AI parse failed (outage / bad JSON) — let the sender know it wasn't
+        # understood. sender 已通过前置 owner 校验，必为非空的本人。
+        _reply_bot(sender_id, "🤔 没太听懂，发「帮助」可查看用法。")
         return
 
     # Remaining types are config operations（owner 身份已在 intent.parse 前校验）.
@@ -501,7 +515,12 @@ def run():
             "`lark-listener doctor` 查看具体问题。%d 秒后退出等待重启。",
             config_path, STARTUP_FAILURE_BACKOFF_SECONDS,
         )
-        time.sleep(STARTUP_FAILURE_BACKOFF_SECONDS)
+        # 分片睡：裸 time.sleep(60) 因 PEP 475 被 SIGTERM 打断后自动续睡，
+        # `stop` 要等 launchd SIGKILL 才能收尾。
+        for _ in range(STARTUP_FAILURE_BACKOFF_SECONDS):
+            if not _running:
+                break
+            time.sleep(1)
         return
     # Pin every lark-cli call to the configured bot before the listener thread
     # starts or any startup message is sent.
@@ -517,26 +536,35 @@ def run():
     listener_thread.start()
 
     error_count = 0
+    next_cycle_due = 0.0  # monotonic 秒；0 = 立即执行首轮
 
     while _running:
-        try:
-            config = load_config(config_path)
-            interval = config.get("poll_interval", 300)
-            my_user_id = config["notify"]["user_id"]
-            # interval<=0 关闭自动轮询：只保留 bot 监听/按需汇总/改配置，不再定时拉取。
-            if interval > 0:
-                poll_once(config_path, state_path)
-            # 任何健康迭代都重置（不只 interval>0）：否则汇总-only 模式下相隔数周
-            # 的孤立瞬时错误会累计成虚假的「连续出错」告警。
-            error_count = 0
-        except Exception:
-            logger.exception("Error during poll cycle")
-            error_count = _note_poll_error(error_count, my_user_id)
+        if time.monotonic() >= next_cycle_due:
+            try:
+                config = load_config(config_path)
+                interval = config.get("poll_interval", 300)
+                my_user_id = config["notify"]["user_id"]
+                # interval<=0 关闭自动轮询：只保留 bot 监听/按需汇总/改配置，不再定时拉取。
+                if interval > 0:
+                    poll_once(config_path, state_path)
+                # 任何健康迭代都重置（不只 interval>0）：否则汇总-only 模式下相隔数周
+                # 的孤立瞬时错误会累计成虚假的「连续出错」告警。
+                error_count = 0
+            except Exception:
+                logger.exception("Error during poll cycle")
+                error_count = _note_poll_error(error_count, my_user_id)
+            next_cycle_due = time.monotonic() + _poll_wait_timeout(interval)
 
-        # Wait for the next interval; with auto-poll off, wake periodically
-        # (IDLE_RELOAD_SECONDS) just to reload config, or earlier on a bot trigger.
+        # 等到下一轮到期，或提前被 bot 消息唤醒。trigger 处理完**不重置节拍**：
+        # 否则任何人发任意消息（含陌生人闲聊）都会立即多跑一轮 poll_once，
+        # 轮询节奏可被外人扰动。interval<=0 时到期动作只是 reload 配置。
+        # 注意不对称：config reload 也只在到期发生——interval 很大（如 3600）
+        # 时 `config set` 最长要等一个旧 interval 才被感知（interval<=0 反而
+        # 有 IDLE_RELOAD_SECONDS=600 上限）；bot 改配置走 _handle_message
+        # 自己 load，不受此影响，restart 亦可立即生效。
+        timeout = max(0.0, next_cycle_due - time.monotonic())
         try:
-            item = _trigger_queue.get(timeout=_poll_wait_timeout(interval))
+            item = _trigger_queue.get(timeout=timeout)
         except queue.Empty:
             continue
         if item is None:
@@ -577,7 +605,7 @@ def main():
 
     p_doctor = sub.add_parser("doctor", help="✅ 主动自检诊断（排查起点）")
     p_doctor.add_argument("--json", action="store_true", help="机读 JSON 输出")
-    p_doctor.add_argument("--deep", action="store_true", help="对 AI 后端发真实最小请求")
+    p_doctor.add_argument("--deep", action="store_true", help="真探 lark-cli search:message 授权 + 对 AI 后端发真实最小请求")
 
     p_config = sub.add_parser(
         "config", help="✅ get/set 非交互改配置；🚫 无参=打开编辑器（人用）")
@@ -591,7 +619,8 @@ def main():
     grp = p_cset.add_mutually_exclusive_group()
     grp.add_argument("--add", action="store_true", help="列表：增一项")
     grp.add_argument("--remove", action="store_true", help="列表：减一项")
-    p_cset.add_argument("--force", action="store_true", help="放行受保护项 ai/notify/lark_cli_appid")
+    p_cset.add_argument("--force", action="store_true",
+                        help=f"放行受保护项 {'/'.join(sorted(config_editor.PROTECTED))}")
 
     p_as = sub.add_parser("agent-skills", help="✅ 安装/卸载 AI Agent 操作 skill")
     p_as.add_argument("op", choices=["install", "uninstall"])
@@ -611,8 +640,7 @@ def main():
         return
     if cmd == "setup":
         from lark_listener.setup_wizard import cmd_setup
-        cmd_setup()
-        return
+        sys.exit(cmd_setup())
 
     from lark_listener import service
     if cmd == "start":

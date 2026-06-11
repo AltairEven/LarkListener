@@ -126,6 +126,15 @@ def _write_cfg(tmp_path):
         f.write(SAMPLE_CONFIG)
     return config_path, state_path
 
+def _mock_cfg(poll_interval=None):
+    """run()/cmd_summarize 系测试共用的最小 mock 配置。"""
+    cfg = {"lark_cli_appid": "cli",
+           "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    if poll_interval is not None:
+        cfg["poll_interval"] = poll_interval
+    return cfg
+
+
 
 @patch("lark_listener.main._reply_bot")
 @patch("lark_listener.main.Notifier")
@@ -592,8 +601,7 @@ def test_cmd_summarize_start_after_end_errors(capsys):
 @patch("lark_listener.main.load_config")
 def test_cmd_summarize_default_pushes_feishu_and_json_stdout(
         mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, MockNotifier, capsys):
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_cfg.return_value = _mock_cfg()
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
     mock_resp.return_value = {
         "code": 0, "errorMsg": "",
@@ -619,8 +627,7 @@ def test_cmd_summarize_default_pushes_feishu_and_json_stdout(
 @patch("lark_listener.main.load_config")
 def test_cmd_summarize_quiet_skips_feishu(
         mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, MockNotifier, capsys):
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_cfg.return_value = _mock_cfg()
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
     mock_resp.return_value = {
         "code": 0, "errorMsg": "",
@@ -643,8 +650,7 @@ def test_cmd_summarize_empty_outputs_json_and_delegates_push(
     """No messages → still a valid empty envelope on stdout. 是否推送由 notify
     统一裁决（空封套 → 卡片 None → 不发），cmd_summarize 不重复判空；
     传入的 resp 必须就是 stdout 那份封套（同源）。"""
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_cfg.return_value = _mock_cfg()
     mock_fw.return_value = ({}, MagicMock())
     code = main_mod.cmd_summarize(1000, 2000)
     out = json.loads(capsys.readouterr().out)
@@ -664,8 +670,7 @@ def test_cmd_summarize_envelope_build_error_still_json(
         mock_cfg, mock_prof, mock_fw, mock_aw, mock_resp, capsys):
     """封套构建本身抛异常（如 chat_id 为 null 的脏消息）也必须产出错误封套，
     stdout 永远是合法 JSON，不能裸 traceback。"""
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_cfg.return_value = _mock_cfg()
     mock_fw.return_value = ({"cat": [{"message_id": "m1"}]}, MagicMock())
     code = main_mod.cmd_summarize(1000, 2000, quiet=True)
     out = json.loads(capsys.readouterr().out)
@@ -698,8 +703,7 @@ def test_main_summarize_requires_start_end(monkeypatch):
 @patch("lark_listener.main.load_config")
 def test_cmd_summarize_out_of_range_timestamp(mock_cfg, mock_prof, capsys):
     # AI agent 误传毫秒时间戳 → 应友好报错而非 traceback
-    mock_cfg.return_value = {"lark_cli_appid": "cli",
-                             "notify": {"user_id": "ou", "bot_chat_id": "oc"}}
+    mock_cfg.return_value = _mock_cfg()
     code = main_mod.cmd_summarize(1_000_000, 1_717_900_000_000)
     assert code == 1
     out = json.loads(capsys.readouterr().out)
@@ -730,8 +734,7 @@ def test_startup_message_reflects_mode():
 @patch("lark_listener.main.load_config")
 def test_run_skips_poll_when_interval_zero(mock_cfg, mock_prof, mock_reply,
                                            mock_thread, mock_poll, mock_disp):
-    mock_cfg.return_value = {"lark_cli_appid": "cli", "poll_interval": 0,
-                             "notify": {"user_id": "ou"}}
+    mock_cfg.return_value = _mock_cfg(poll_interval=0)
     main_mod._running = True
     try:
         with patch.object(main_mod._trigger_queue, "get", return_value=None):
@@ -749,8 +752,7 @@ def test_run_skips_poll_when_interval_zero(mock_cfg, mock_prof, mock_reply,
 @patch("lark_listener.main.load_config")
 def test_run_polls_when_interval_positive(mock_cfg, mock_prof, mock_reply,
                                           mock_thread, mock_poll, mock_disp):
-    mock_cfg.return_value = {"lark_cli_appid": "cli", "poll_interval": 300,
-                             "notify": {"user_id": "ou"}}
+    mock_cfg.return_value = _mock_cfg(poll_interval=300)
     main_mod._running = True
     try:
         with patch.object(main_mod._trigger_queue, "get", return_value=None):
@@ -856,7 +858,8 @@ def test_poll_once_notify_failure_still_advances_state(MockFetcher, MockAnalyzer
 @patch("lark_listener.main.subprocess.Popen")
 def test_bot_listener_does_not_pipe_stderr(mock_popen, mock_sleep, mock_kill):
     """stderr 不能开 PIPE 又不读：lark-cli 长驻子进程写满 64KB 管道缓冲后
-    会阻塞在 stderr 写入，事件流静默冻结（bot 不再响应且无日志）。"""
+    会阻塞在 stderr 写入，事件流静默冻结。继承父进程 stderr（None）：
+    零管道零死锁，且订阅失败原因经 launchd 落进 stderr.log 可排查。"""
     proc = MagicMock()
     proc.stdout = iter([])
     mock_popen.return_value = proc
@@ -869,8 +872,7 @@ def test_bot_listener_does_not_pipe_stderr(mock_popen, mock_sleep, mock_kill):
         main_mod._running = True
 
     import subprocess as _sp
-    assert mock_popen.call_args.kwargs["stderr"] != _sp.PIPE
-    assert mock_popen.call_args.kwargs["stderr"] == _sp.DEVNULL
+    assert mock_popen.call_args.kwargs.get("stderr") is None
 
 
 @patch("lark_listener.main.time.sleep")
@@ -882,8 +884,10 @@ def test_run_bad_startup_config_no_crash_loop(mock_cfg, mock_reply, mock_thread,
     每 10 秒无限重启循环。必须捕获、慢退（sleep ≥ 60s）后才退出。"""
     main_mod._running = True
     main_mod.run()  # 必须不抛
-    assert mock_sleep.called
-    assert mock_sleep.call_args.args[0] >= 60
+    # 慢退总时长 ≥ 60s，且必须分片睡（裸 time.sleep(60) 因 PEP 475 对
+    # SIGTERM 免疫，stop 会等到 launchd SIGKILL）。
+    assert sum(c.args[0] for c in mock_sleep.call_args_list) >= 60
+    assert max(c.args[0] for c in mock_sleep.call_args_list) <= 5
 
 
 @patch("lark_listener.main._add_reaction")
@@ -899,3 +903,123 @@ def test_handle_message_ignores_stranger_before_intent(mock_poll, mock_parse, mo
     mock_poll.assert_not_called()
     mock_reply.assert_not_called()
     mock_react.assert_not_called()
+
+
+# --- 二轮 review：守护循环与通知兜底的补全 ---
+
+
+@patch("lark_listener.main._dispatch_trigger")
+@patch("lark_listener.main.poll_once")
+@patch("lark_listener.main.threading.Thread")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.set_lark_profile")
+@patch("lark_listener.main.load_config")
+def test_run_trigger_does_not_restart_poll_cycle(mock_cfg, mock_prof, mock_reply,
+                                                 mock_thread, mock_poll, mock_disp):
+    """bot 消息处理完回到等待：不得立即多跑一轮 poll_once——否则任何人发
+    任意消息（含陌生人闲聊）都能提前触发轮询、扰动调度节奏。"""
+    mock_cfg.return_value = _mock_cfg(poll_interval=300)
+    main_mod._running = True
+    try:
+        with patch.object(main_mod._trigger_queue, "get",
+                          side_effect=[("hi", "ou_x", "om_1"), None]):
+            main_mod.run()
+    finally:
+        main_mod._running = True
+    mock_poll.assert_called_once()
+    mock_disp.assert_called_once()
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_notify_failure_alerts_owner(MockFetcher, MockAnalyzer, MockNotifier, mock_reply, tmp_path):
+    """notify 失败丢弃该轮汇总时必须给 owner 一条 best-effort 告警——
+    否则消息被静默永久丢弃，用户零感知。"""
+    mf = MockFetcher.return_value
+    mf.fetch.return_value = {
+        MessageCategory.P2P: [{"message_id": "m1"}],
+        MessageCategory.AT_ME: [], MessageCategory.KEYWORD: [], MessageCategory.AT_ALL: [],
+    }
+    mf.fetch_context.return_value = {}
+    MockAnalyzer.return_value.analyze.return_value = {}
+    MockNotifier.return_value.notify.side_effect = TypeError("dirty")
+    config_path, state_path = _write_cfg(tmp_path)
+
+    poll_once(config_path, state_path)
+
+    assert any("失败" in c.args[1] for c in mock_reply.call_args_list)
+
+
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.Notifier")
+@patch("lark_listener.main.Analyzer")
+@patch("lark_listener.main.Fetcher")
+def test_poll_once_skips_messages_without_id(MockFetcher, MockAnalyzer, MockNotifier, mock_reply, tmp_path):
+    """收集 all_ids 时缺 message_id 的脏消息跳过——硬下标会在 notify 兜底
+    之后、state.save 之前抛 KeyError，毒消息循环换个位置复活。"""
+    mf = MockFetcher.return_value
+    mf.fetch.return_value = {
+        MessageCategory.P2P: [{"message_id": "m1"}, {"no_id": True}],
+        MessageCategory.AT_ME: [], MessageCategory.KEYWORD: [], MessageCategory.AT_ALL: [],
+    }
+    mf.fetch_context.return_value = {}
+    MockAnalyzer.return_value.analyze.return_value = {}
+    config_path, state_path = _write_cfg(tmp_path)
+
+    poll_once(config_path, state_path)  # 必须不抛
+
+    with open(state_path) as f:
+        state = json.load(f)
+    assert state["processed_message_ids"] == ["m1"]
+
+
+@patch("lark_listener.main.subprocess.run")
+def test_kill_stale_event_subscribers_scoped_to_profile(mock_run):
+    """pkill 模式必须同时带 subscribe 限定词与本实例 profile：丢掉 subscribe
+    会误杀同 profile 的 `lark-cli event consume`（其它 agent 会话的真实用法）；
+    丢掉 profile 会误杀 dev/prod 对方实例。"""
+    import lark_listener.binaries as binaries
+    orig = binaries._lark_profile
+    binaries.set_lark_profile("cli_mine")
+    try:
+        main_mod._kill_stale_event_subscribers()
+    finally:
+        binaries.set_lark_profile(orig)
+    pattern = mock_run.call_args.args[0][2]
+    assert "subscribe" in pattern
+    assert "cli_mine" in pattern
+
+
+@patch("lark_listener.main.subprocess.run")
+def test_kill_stale_event_subscribers_skips_without_profile(mock_run):
+    """profile 未知时宁可不杀（孤儿会在下次带 profile 启动时清理），
+    也不能用全局模式误杀无关进程。"""
+    import lark_listener.binaries as binaries
+    orig = binaries._lark_profile
+    binaries.set_lark_profile(None)
+    try:
+        main_mod._kill_stale_event_subscribers()
+    finally:
+        binaries.set_lark_profile(orig)
+    mock_run.assert_not_called()
+
+
+@patch("lark_listener.main.time.sleep")
+@patch("lark_listener.main.threading.Thread")
+@patch("lark_listener.main._reply_bot")
+@patch("lark_listener.main.load_config", side_effect=ValueError("bad"))
+def test_run_startup_backoff_exits_early_on_stop(mock_cfg, mock_reply, mock_thread, mock_sleep):
+    """分片睡的意义：stop（SIGTERM 置 _running=False）后 1 秒内退出，
+    不等满 60 秒。"""
+    def _stop_after_three(_secs):
+        if mock_sleep.call_count >= 3:
+            main_mod._running = False
+    mock_sleep.side_effect = _stop_after_three
+    main_mod._running = True
+    try:
+        main_mod.run()
+    finally:
+        main_mod._running = True
+    assert mock_sleep.call_count <= 5

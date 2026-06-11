@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Optional
 
-from lark_listener.analyzer import _extract_json
+from lark_listener import providers
+from lark_listener.common import TZ
+from lark_listener.providers import extract_json as _extract_json
 from lark_listener.config_editor import PROTECTED
 
 logger = logging.getLogger("lark_listener")
-TZ = timezone(timedelta(hours=8))
 
 # 意图分类是轻量调用（max_tokens 512），但仍需上限避免 SDK 默认 600s 卡死轮询线程。
 INTENT_TIMEOUT = 60
@@ -57,43 +58,24 @@ def _editable_config(config: dict) -> dict:
     """Only the editable (non-protected) fields are sent to the AI.
 
     ai / notify must be configured manually — they are never parsed or set via
-    the bot, so their values (api_key, user_id, bot_chat_id) never leave for the
-    AI provider.
+    the bot, so their secrets (api_key, user_id) never leave for the AI
+    provider. Note: exclude_chat_ids IS editable and may contain the bot chat's
+    oc_xxx (setup puts it there) — a chat id alone is low-sensitivity and this
+    is accepted.
     """
     return {k: v for k, v in config.items() if k not in PROTECTED}
 
 
 def _call_ai(prompt: str, ai_cfg: dict) -> str:
-    """Return the raw text response from the configured provider."""
-    provider = ai_cfg.get("provider")
-    api_key = ai_cfg.get("api_key", "")
-    if provider == "openai":
-        import openai
-        client = openai.OpenAI(api_key=api_key, base_url=ai_cfg.get("base_url") or None)
-        resp = client.chat.completions.create(
-            model=ai_cfg["model"], messages=[{"role": "user", "content": prompt}],
-            timeout=INTENT_TIMEOUT)
-        return resp.choices[0].message.content
-    if provider == "claude":
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        resp = client.messages.create(
-            model=ai_cfg["model"], max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=INTENT_TIMEOUT)
-        return resp.content[0].text
-    if provider == "ollama":
-        import urllib.request
-        url = (ai_cfg.get("base_url") or "http://localhost:11434") + "/api/chat"
-        payload = json.dumps({
-            "model": ai_cfg["model"], "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
-        }).encode()
-        req = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())["message"]["content"]
-    raise ValueError(f"Unknown provider: {provider}")
+    """Return the raw text response from the configured provider.
+
+    分发与各后端实现统一在 providers.py；意图分类是轻量调用——claude 限
+    max_tokens=512（openai/ollama 不限，与既有行为一致），无 system prompt。"""
+    return providers.complete(
+        ai_cfg.get("provider"),
+        model=ai_cfg["model"], api_key=ai_cfg.get("api_key", ""),
+        base_url=ai_cfg.get("base_url") or "", user_prompt=prompt,
+        max_tokens=512, timeout=INTENT_TIMEOUT)
 
 
 def parse(message: str, config: dict) -> Intent:

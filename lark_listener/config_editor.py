@@ -34,9 +34,19 @@ def dump_roundtrip(path: str | Path, data) -> None:
     """
     p = Path(path)
     tmp = p.with_suffix(p.suffix + ".tmp")
+    # config 含明文 api_key：保持原文件权限（用户可能已 chmod 600），新建默认
+    # 0600——否则 os.replace 会让 tmp 的 umask 权限（0644）静默取代原 mode。
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        mode = p.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o600
+    try:
+        # tmp 以 0600 创建（而非先 umask 0644 写完密钥再 chmod——那留有
+        # 毫秒级全文可读窗口）；replace 前再对齐目标 mode。
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             _yaml().dump(data, f)
+        os.chmod(tmp, mode)
         os.replace(tmp, p)
     except Exception:
         tmp.unlink(missing_ok=True)
@@ -109,6 +119,16 @@ def _apply_list_op(current, op, value):
     return None, f"未知操作 {op}"
 
 
+def removes_bot_chat(bot_chat_id, current, new_value) -> bool:
+    """exclude_chat_ids 的变更是否会把 bot 会话移出——防自反馈守卫的共享判断
+    （bot 指令路径 _plan_changes 与 CLI 路径 config_cli.config_set 共用）。
+    移出后汇总卡片命中关键词会被下一轮轮询再捞起、再汇总，循环放大。"""
+    bot = str(bot_chat_id or "")
+    return bool(bot
+                and bot in [str(x) for x in (current or [])]
+                and bot not in [str(x) for x in (new_value or [])])
+
+
 def _plan_changes(changes, effective_config):
     """Validate + resolve changes. Returns (resolved, error) where resolved is
     a list of (field, new_value, diff_line)."""
@@ -130,6 +150,9 @@ def _plan_changes(changes, effective_config):
             new_value, err = _coerce_scalar(field, value, current)
         if err:
             return None, err
+        bot_chat_id = (effective_config.get("notify") or {}).get("bot_chat_id")
+        if field == "exclude_chat_ids" and removes_bot_chat(bot_chat_id, current, new_value):
+            return None, "exclude_chat_ids 中的 bot 会话不可移除（防止汇总消息被自身轮询命中形成自反馈）"
         if new_value == current:
             continue  # no-op: value unchanged, nothing to do
         resolved.append((field, new_value, f"{field}: {current!r} → {new_value!r}"))
@@ -148,7 +171,8 @@ def apply_changes(path, changes, effective_config) -> ApplyResult:
     resolved, error = _plan_changes(changes, effective_config)
     if error:
         return ApplyResult(False, error=error)
-    data = load_roundtrip(path)
+    # 空文件 load_roundtrip 返回 None；按空映射处理，不能 TypeError。
+    data = load_roundtrip(path) or CommentedMap()
     for field, new_value, _ in resolved:
         data[field] = new_value
     dump_roundtrip(path, data)

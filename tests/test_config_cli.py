@@ -151,3 +151,44 @@ def test_config_set_api_key_not_echoed(tmp_path, capsys):
     assert "已隐藏" in out
     # 但确实写进了文件
     assert config_cli.config_mod.load_config(str(p))["ai"]["api_key"] == "supersecret"
+
+
+# --- 二轮 review：null 列表字段 ---
+
+NULL_LIST_CFG = ("poll_interval: 300\nkeywords:\n"
+                 "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
+                 "notify:\n  user_id: ou\n  bot_chat_id: oc\n"
+                 "lark_cli_appid: cli\n")
+
+
+def test_config_set_add_to_null_list(tmp_path):
+    """手编 `keywords:`（null）后 --add 应按空列表处理，而不是被拒。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(NULL_LIST_CFG, encoding="utf-8")
+    assert config_cli.config_set("keywords", "上线", add=True, path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["keywords"] == ["上线"]
+
+
+def test_config_set_null_list_plain_set_makes_list(tmp_path):
+    """null 列表字段整体 set 必须写成列表，绝不能落成字符串
+    （字符串会被 fetcher 逐字符当关键词搜索）。"""
+    p = tmp_path / "config.yaml"
+    p.write_text(NULL_LIST_CFG, encoding="utf-8")
+    assert config_cli.config_set("keywords", "上线,故障", path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["keywords"] == ["上线", "故障"]
+
+
+def test_config_set_remove_bot_chat_blocked_without_force(tmp_path):
+    """CLI 路径同样不能把 bot 会话移出 exclude_chat_ids（SKILL.md 教 agent
+    用的正是这条路径）；--force 保留 owner 逃生口。"""
+    cfg = ("poll_interval: 300\nkeywords: []\nexclude_chat_ids:\n  - oc_bot\n"
+           "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
+           "notify:\n  user_id: ou\n  bot_chat_id: oc_bot\n"
+           "lark_cli_appid: cli\n")
+    p = tmp_path / "config.yaml"
+    p.write_text(cfg, encoding="utf-8")
+    assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, path=p) == 1
+    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == ["oc_bot"]
+    # --force 放行
+    assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, force=True, path=p) == 0
+    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == []

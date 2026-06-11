@@ -83,3 +83,44 @@ def test_state_save_is_atomic_no_tmp_left(tmp_path):
     state.save()
     assert not (tmp_path / "state.json.tmp").exists()
     assert json.loads(path.read_text())["processed_message_ids"] == ["msg_001"]
+
+
+# --- 二轮 review：损坏 state 的形状兜底 + _ordered_ids 截断 ---
+
+
+def test_state_wrong_shape_starts_fresh(tmp_path):
+    """state.json 是合法 JSON 但顶层不是对象 → 必须按损坏处理重新开始，
+    不能 AttributeError（State 每轮 poll 都会构造，崩了窗口永不推进）。"""
+    p = tmp_path / "state.json"
+    p.write_text("[1, 2, 3]")
+    state = State(str(p))
+    assert state.last_poll_time is None
+    assert state.processed_message_ids == set()
+
+
+def test_state_numeric_last_poll_starts_fresh(tmp_path):
+    """last_poll_time 为数字 → fromisoformat TypeError，必须兜住。"""
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"last_poll_time": 123, "processed_message_ids": []}))
+    state = State(str(p))
+    assert state.last_poll_time is None
+
+
+def test_state_save_truncates_ordered_ids(tmp_path):
+    """save() 截断必须同步 _ordered_ids：否则内存无界增长，且被挤出 set 的
+    旧 id 再 add 时会在列表里重复。"""
+    from lark_listener.state import MAX_PROCESSED_IDS
+    s = State(str(tmp_path / "state.json"))
+    s.add_processed_ids([f"m{i}" for i in range(MAX_PROCESSED_IDS + 5)])
+    s.save()
+    assert len(s._ordered_ids) == MAX_PROCESSED_IDS
+    s.add_processed_ids(["m0"])  # m0 已被挤出 set，重新加入
+    assert s._ordered_ids.count("m0") == 1
+
+
+def test_state_default_path_respects_env(monkeypatch, tmp_path):
+    """裸 State() 的默认路径必须尊重 LARK_LISTENER_HOME——否则 dev 隔离下
+    任何新代码裸调 State() 会写穿生产 state.json。"""
+    monkeypatch.setenv("LARK_LISTENER_HOME", str(tmp_path))
+    s = State()
+    assert str(s._path) == str(tmp_path / "state.json")
