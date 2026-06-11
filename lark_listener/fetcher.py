@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 from lark_listener.binaries import lark_cli
+from lark_listener.chats import ChatClass
+
+logger = logging.getLogger("lark_listener")
 
 
 class MessageCategory(Enum):
@@ -14,6 +18,15 @@ class MessageCategory(Enum):
     AT_ME = "at_me"
     KEYWORD = "keyword"
     AT_ALL = "at_all"
+    SPECIAL = "special"
+
+
+def _chunked(seq: list, n: int) -> list:
+    return [seq[i:i + n] for i in range(0, len(seq), n)]
+
+
+# 合并抓取的每批会话数：限制单次 --chat-id 长度与单调用分页预算。
+_CHAT_BATCH = 10
 
 
 # 机器人应用名的模块级成功缓存（app_id → app_name）：应用名基本不变，
@@ -22,9 +35,12 @@ _APP_NAME_CACHE: dict[str, str] = {}
 
 
 class Fetcher:
-    def __init__(self, keywords: Optional[list[str]] = None, include_at_all: bool = True):
+    def __init__(self, keywords: Optional[list[str]] = None,
+                 registry=None, special_max_messages: int = 20):
         self.keywords = keywords or []
-        self.include_at_all = include_at_all
+        # registry=None（降级/兼容态）→ 群一律按勿扰、无特别关注抓取。
+        self.registry = registry
+        self.special_max_messages = special_max_messages
         # 实例级失败记录：权限未批（210508）等失败本轮不重试，下轮新实例再试。
         self._app_name_failed: set[str] = set()
 
@@ -39,7 +55,7 @@ class Fetcher:
         _exclude = exclude_chat_ids or set()
         result = {cat: [] for cat in MessageCategory}
 
-        # Priority order: P2P > AT_ME > KEYWORD
+        # Priority order: P2P > AT_ME > AT_ALL > SPECIAL > KEYWORD
         # 1. Private messages
         p2p_msgs = self._search(start, end, chat_type="p2p")
         for msg in p2p_msgs:
@@ -52,20 +68,20 @@ class Fetcher:
         at_msgs = self._search(start, end, chat_type="group", is_at_me=True)
         for msg in at_msgs:
             mid = msg["message_id"]
-            if mid not in seen_ids and msg.get("chat_id") not in _exclude:
-                content = msg.get("content", "")
-                # "@_all" 是飞书原始 content 的 @所有人 占位符（搜索 API 的
-                # is_at_me 把 @所有人 也算「@我」返回）；漏掉它会让 @所有人
-                # 误入 AT_ME，绕过 include_at_all=False。
-                is_at_all = ("@everyone" in content or "@所有人" in content
-                             or "@all" in content or "@_all" in content)
-                if is_at_all and not self.include_at_all:
-                    # Skip AT_ALL but don't mark as seen,
-                    # so keyword search can still pick it up
-                    continue
-                cat = MessageCategory.AT_ALL if is_at_all else MessageCategory.AT_ME
-                result[cat].append(msg)
-                seen_ids.add(mid)
+            if mid in seen_ids or msg.get("chat_id") in _exclude:
+                continue
+            content = msg.get("content", "")
+            # "@_all" 是飞书原始 content 的 @所有人 占位符（搜索 API 的
+            # is_at_me 把 @所有人 也算「@我」返回）。
+            is_at_all = ("@everyone" in content or "@所有人" in content
+                         or "@all" in content or "@_all" in content)
+            if is_at_all and self._classify(msg) is ChatClass.MUTED:
+                # 勿扰群 @所有人：仅命中关键词才收——跳过且不标 seen，
+                # 留给关键词搜索捞（命中即归关键词区）。
+                continue
+            cat = MessageCategory.AT_ALL if is_at_all else MessageCategory.AT_ME
+            result[cat].append(msg)
+            seen_ids.add(mid)
 
         # 3. Keyword matches
         for keyword in self.keywords:
@@ -73,9 +89,36 @@ class Fetcher:
             for msg in kw_msgs:
                 mid = msg["message_id"]
                 if mid not in seen_ids and msg.get("chat_id") not in _exclude:
+                    if self._classify(msg) is ChatClass.SPECIAL:
+                        # 归类优先级：特别关注 > 关键词——特别关注群的命中
+                        # 消息由下方全量抓取统一认领（不标 seen）。
+                        continue
                     msg["matched_keyword"] = keyword
                     result[MessageCategory.KEYWORD].append(msg)
                     seen_ids.add(mid)
+
+        # 4. 特别关注群全量抓取（合并调用：chat_id 逗号分隔，每批 _CHAT_BATCH 个）
+        special_ids = [cid for cid in
+                       (self.registry.special_chat_ids() if self.registry else [])
+                       if cid not in _exclude]
+        for chunk in _chunked(special_ids, _CHAT_BATCH):
+            msgs = self._search(start, end, chat_id=",".join(chunk))
+            by_chat: dict[str, list] = {}
+            for m in msgs:
+                if m["message_id"] in seen_ids or m.get("chat_id") in _exclude:
+                    continue
+                by_chat.setdefault(m.get("chat_id") or "unknown", []).append(m)
+            for cid, chat_msgs in by_chat.items():
+                chat_msgs.sort(key=lambda m: m.get("create_time", ""))
+                dropped = len(chat_msgs) - self.special_max_messages
+                if dropped > 0:
+                    # no silent caps：截断必须留痕
+                    logger.info("特别关注群 %s 本轮 %d 条超出上限 %d，丢弃最早 %d 条",
+                                cid, len(chat_msgs), self.special_max_messages, dropped)
+                    chat_msgs = chat_msgs[-self.special_max_messages:]
+                for m in chat_msgs:
+                    result[MessageCategory.SPECIAL].append(m)
+                    seen_ids.add(m["message_id"])
 
         # Fill in missing chat names for group messages
         self._fill_chat_names(result)
@@ -114,10 +157,18 @@ class Fetcher:
 
         return context
 
+    def _classify(self, msg: dict) -> ChatClass:
+        if self.registry is None:
+            return (ChatClass.MUTED if msg.get("chat_type") == "group"
+                    else ChatClass.NORMAL)
+        return self.registry.classify(msg.get("chat_id") or "",
+                                      msg.get("chat_type", ""))
+
     def _fill_chat_names(self, result: dict[MessageCategory, list[dict[str, Any]]]):
         """Look up chat names for group messages missing chat_name."""
         missing_ids: set[str] = set()
-        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL, MessageCategory.KEYWORD):
+        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL,
+                    MessageCategory.KEYWORD, MessageCategory.SPECIAL):
             for msg in result[cat]:
                 if not msg.get("chat_name") and msg.get("chat_id"):
                     missing_ids.add(msg["chat_id"])
@@ -133,7 +184,8 @@ class Fetcher:
                 name_map[chat_id] = name
 
         # Apply names back
-        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL, MessageCategory.KEYWORD):
+        for cat in (MessageCategory.AT_ME, MessageCategory.AT_ALL,
+                    MessageCategory.KEYWORD, MessageCategory.SPECIAL):
             for msg in result[cat]:
                 if not msg.get("chat_name") and msg.get("chat_id") in name_map:
                     msg["chat_name"] = name_map[msg["chat_id"]]

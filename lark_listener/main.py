@@ -197,9 +197,9 @@ def _fetch_window(config, start, end, processed_ids):
     """拉取 [start, end) 内的相关消息。返回 (categorized, fetcher)。
     fetcher 一并返回，供 _analyze_window 取上下文（同一实例）。"""
     exclude_ids = set(config.get("exclude_chat_ids", []))
+    # 过渡态：registry 接线在后续任务完成；当前 Fetcher 无 registry → 群按勿扰降级。
     fetcher = Fetcher(
         keywords=config.get("keywords", []),
-        include_at_all=config.get("include_at_all", True),
     )
     categorized = fetcher.fetch(
         start, end,
