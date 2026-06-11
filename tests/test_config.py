@@ -1,5 +1,6 @@
 import pytest
-from lark_listener.config import load_config
+import yaml as _yaml
+from lark_listener.config import load_config, exclude_chat_id_set
 
 
 SAMPLE_CONFIG = """\
@@ -136,7 +137,7 @@ notify:
     config = load_config(str(config_file))
 
     assert config["keywords"] == []
-    assert config["exclude_chat_ids"] == []
+    assert config["exclude_chats"] == []
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -199,11 +200,12 @@ def test_load_config_coerces_scalar_keywords_to_list(tmp_path):
 
 
 def test_load_config_coerces_null_list_fields(tmp_path):
-    """`exclude_chat_ids:`（null）→ []，绝不让 `set(None)` TypeError。"""
+    """`exclude_chat_ids:`（null）旧键兼容迁移为 exclude_chats=[]，绝不让 `set(None)` TypeError。"""
     p = tmp_path / "config.yaml"
     p.write_text(BAD_TYPES_CONFIG)
     cfg = load_config(str(p))
-    assert cfg["exclude_chat_ids"] == []
+    assert cfg["exclude_chats"] == []
+    assert "exclude_chat_ids" not in cfg
 
 
 def test_load_config_list_items_coerced_str_and_none_dropped(tmp_path):
@@ -220,3 +222,79 @@ def test_load_config_negative_context_messages_clamps_to_zero(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(BAD_TYPES_CONFIG.replace("context_messages: null", "context_messages: -1"))
     assert load_config(str(p))["context_messages"] == 0
+
+
+# --- Task 2: special_focus / exclude_chats 钳制与兼容 ---
+
+
+def _write_cfg(tmp_path, extra: dict):
+    base = {
+        "lark_cli_appid": "cli_x",
+        "ai": {"provider": "claude", "model": "m"},
+        "notify": {"user_id": "ou_me", "bot_chat_id": "oc_bot"},
+    }
+    base.update(extra)
+    p = tmp_path / "config.yaml"
+    p.write_text(_yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
+    return str(p)
+
+
+def test_special_focus_defaults(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {}))
+    assert cfg["special_focus"] == {"enabled": False, "max_messages": 20, "chats": []}
+
+
+def test_special_focus_clamps_bad_values(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {"special_focus": {
+        "enabled": "yes",                      # 非 bool → False
+        "max_messages": "abc",                 # 非法 → 20
+        "chats": [
+            {"chat_id": "oc_a", "keywords": "扩容"},   # 标量 keywords → 单元素列表
+            {"name": "缺id"},                          # 缺 chat_id → 丢弃
+            "oc_bare",                                 # 非 dict → 丢弃
+        ],
+    }}))
+    sf = cfg["special_focus"]
+    assert sf["enabled"] is False
+    assert sf["max_messages"] == 20
+    assert sf["chats"] == [{"chat_id": "oc_a", "name": "", "keywords": ["扩容"]}]
+
+
+def test_special_focus_non_dict_falls_back(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {"special_focus": "on"}))
+    assert cfg["special_focus"] == {"enabled": False, "max_messages": 20, "chats": []}
+
+
+def test_exclude_chats_new_format(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {"exclude_chats": [
+        {"chat_id": "oc_a", "name": "A群"},
+        {"chat_id": "oc_b"},
+    ]}))
+    assert cfg["exclude_chats"] == [
+        {"chat_id": "oc_a", "name": "A群"},
+        {"chat_id": "oc_b", "name": ""},
+    ]
+    assert exclude_chat_id_set(cfg) == {"oc_a", "oc_b"}
+
+
+def test_exclude_chats_legacy_key_compat(tmp_path):
+    """旧键 exclude_chat_ids（纯 id 列表）兼容读取为新结构。"""
+    cfg = load_config(_write_cfg(tmp_path, {"exclude_chat_ids": ["oc_old"]}))
+    assert cfg["exclude_chats"] == [{"chat_id": "oc_old", "name": ""}]
+    assert "exclude_chat_ids" not in cfg
+
+
+def test_exclude_chats_bad_entries_dropped(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {"exclude_chats": [
+        "oc_str",            # 纯 str 兼容为 chat_id
+        {"name": "缺id"},    # 丢弃
+        None,                # 丢弃
+        123,                 # 丢弃（非 str 非 dict）
+        {"chat_id": True},   # bool 丢弃
+    ]}))
+    assert cfg["exclude_chats"] == [{"chat_id": "oc_str", "name": ""}]
+
+
+def test_include_at_all_removed_and_ignored(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, {"include_at_all": False}))
+    assert "include_at_all" not in cfg

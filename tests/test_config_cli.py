@@ -181,6 +181,7 @@ def test_config_set_null_list_plain_set_makes_list(tmp_path):
 def test_config_set_remove_bot_chat_blocked_without_force(tmp_path):
     """CLI 路径同样不能把 bot 会话移出 exclude_chat_ids（SKILL.md 教 agent
     用的正是这条路径）；--force 保留 owner 逃生口。"""
+    # load_config 已把旧键归一为 exclude_chats（Task 9 将整体重写本测试）
     cfg = ("poll_interval: 300\nkeywords: []\nexclude_chat_ids:\n  - oc_bot\n"
            "ai:\n  provider: claude\n  model: m\n  api_key: k\n  base_url: ''\n"
            "notify:\n  user_id: ou\n  bot_chat_id: oc_bot\n"
@@ -188,7 +189,7 @@ def test_config_set_remove_bot_chat_blocked_without_force(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(cfg, encoding="utf-8")
     assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, path=p) == 1
-    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == ["oc_bot"]
+    assert config_cli.config_mod.load_config(str(p))["exclude_chats"] == [{"chat_id": "oc_bot", "name": ""}]
     # --force 放行
     assert config_cli.config_set("exclude_chat_ids", "oc_bot", remove=True, force=True, path=p) == 0
-    assert config_cli.config_mod.load_config(str(p))["exclude_chat_ids"] == []
+    assert config_cli.config_mod.load_config(str(p))["exclude_chats"] == []
