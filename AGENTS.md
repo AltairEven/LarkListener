@@ -45,7 +45,7 @@ silently assume the currently-active `lark-cli` profile is the right one; ask.
 
 ## 🚫 Do NOT run these unattended
 
-`setup`, `uninstall`, `config` block on stdin or open a GUI. EOF/Ctrl-C now cancels
+`setup`, `uninstall`, `config` block on stdin or open a GUI. EOF/Ctrl-C cancels
 cleanly (exit 1, nothing half-written; `setup` exits 0 on success / 1 on cancel or
 missing prereqs) — but still hand them to the user; running them through your Bash
 tool just wastes a cancelled run.
@@ -76,7 +76,7 @@ tool just wastes a cancelled run.
 ## ✅ Safe for you to run
 
 - `lark-listener doctor [--json] [--deep]` — active self-check (config / service /
-  lark-cli / poll freshness / logs / AI backend), each finding carries a `fix`.
+  lark-cli / poll freshness / logs / AI backend / special-focus config), each finding carries a `fix`.
   **Start here when something is wrong.** Exit 0 = all pass, 1 = has a fail.
   The shallow check cannot see token expiry — when summaries stop arriving, run
   `doctor --deep` (really probes `search:message` auth + the AI backend).
@@ -84,7 +84,7 @@ tool just wastes a cancelled run.
   locations + last poll. Exit 0 running / 3 stopped / 4 not installed.
 - `lark-listener summarize --start <epoch> --end <epoch> [--quiet]` — on-demand
   summary of a time window (Unix-second timestamps; by default it also pushes the
-  Feishu DM card **and a macOS desktop notification**, `--quiet` returns stdout only).
+  Feishu DM card and a macOS desktop notification, `--quiet` returns stdout only).
   Read-only; safe alongside the daemon. **stdout is a unified JSON envelope
   `{code, errorMsg, data}`** — success/empty/error are all valid JSON, exit code =
   `code`. `code: 0` → `data.conversations` is the array (empty array = nothing to
@@ -94,7 +94,7 @@ tool just wastes a cancelled run.
 - `lark-listener config set KEY VALUE [--add|--remove] [--force]` — non-interactive
   edit; dotted paths (`poll_interval`, `keywords`, `ai.model`, …); protected keys
   (`ai`/`notify`/`lark_cli_appid`) need `--force`; also refused without `--force`:
-  removing the bot's own chat from `exclude_chat_ids` (anti-feedback-loop guard).
+  removing the bot's own chat from `exclude_chats` (anti-feedback-loop guard).
   Takes effect at the next poll cycle — up to one (old) interval away for large
   intervals; chat-side edits follow the same cadence. With `poll_interval=0`
   (auto-polling off) the daemon picks changes up within ~10 min.
@@ -115,9 +115,25 @@ silently dropped (no reply, no AI call) — the bot is not a shared trigger.
 `ai` / `notify` / `lark_cli_appid` are protected — change them by editing the file
 or `config set … --force`, not over chat; config edits take effect on the next poll
 (no restart; with `poll_interval=0` within ~10 min). Restart is only needed after a
-code upgrade — or after changing `lark_cli_appid`. Setting `poll_interval` to `0`
+code upgrade or after changing `lark_cli_appid`. Setting `poll_interval` to `0`
 disables auto-polling entirely: the service stays online and the bot still answers
 「汇总」/ config chat, it just stops pushing on a timer; any positive value restores it.
+
+## Chat classification & special focus
+
+Group chats are classified by the user's Feishu mute setting: **muted groups** only
+contribute keyword hits; with `special_focus.enabled=true` every **non-muted group**
+becomes "special focus" and is summarised in full (capped at
+`special_focus.max_messages` per group per cycle, default 20). Summary cards section
+in the order p2p → at_me → at_all → special → keyword. Knobs you may be asked to turn:
+
+- `special_focus.enabled` / `special_focus.max_messages` — `config set` dotted paths.
+- `special_focus.chats` (per-chat extra focus keywords) — **not editable via CLI or
+  bot chat**; edit `~/.lark_listener/config.yaml` directly. Entries do NOT change a
+  chat's classification — they only steer the AI analysis, and they are silently
+  inactive while that chat is muted in Feishu (`doctor --deep` flags this).
+- `exclude_chats` (excluded from all summaries) — `config set exclude_chats oc_xxx
+  --add|--remove` takes a bare chat_id; the name is auto-filled on the next poll.
 
 ## Upgrade
 
