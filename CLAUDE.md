@@ -109,4 +109,4 @@ rm -rf ~/.lark_listener
 
 ## 提交约定
 
-未经用户明确要求，**不要 `git commit` / `git push`**。`docs/` 被 gitignore（设计文档/计划不入库）。
+未经用户明确要求，**不要 `git commit` / `git push`**。`docs/`（设计文档/计划）已入库追踪；`.codegraph/` 仅追踪其 `.gitignore`（索引/守护进程文件为机器本地，不入库）。
