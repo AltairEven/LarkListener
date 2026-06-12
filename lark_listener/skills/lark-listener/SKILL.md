@@ -27,7 +27,7 @@ lark-listener summarize --start $(date -v-30M +%s) --end $(date +%s) --quiet
 ## 先诊断
 排查任何问题，先跑（机读）：
 ```bash
-lark-listener doctor --json     # 主动自检：config/服务/lark-cli 授权/轮询时效/日志/AI 后端
+lark-listener doctor --json     # 主动自检：config/服务/lark-cli 授权/轮询时效/日志/AI 后端/特别关注配置
 lark-listener status --json     # 服务三态 + 进程 PID + 文件位置 + 上次轮询
 ```
 `doctor` 每项带 `fix` 字段，直接给修复命令。退出码：status 0=运行/3=停/4=未装；doctor 0=全过/1=有 fail。
